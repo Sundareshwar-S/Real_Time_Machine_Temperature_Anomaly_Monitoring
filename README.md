@@ -73,7 +73,7 @@ Expect `Created topic machine-temperature.` One partition keeps every reading in
 
 ### 6. Create the tables
 ```bash
-python -m src.db --init           # expect: Tables: metrics_current, readings
+python -m src.db --init           # expect: Tables: forecasts, hourly_stats, metrics_current, readings
 ```
 
 ### 7. Train the model
@@ -92,17 +92,21 @@ Run it again after any change to the `MYSQL_*` values in `.env`.
 
 ### 9. Run the tests
 ```bash
-pytest                            # expect: 21 passed
+pytest                            # expect: 29 passed
 ```
 
 ## Run the pipeline
-Use three terminals, each with the virtual environment active, started in this order.
+Use four terminals, each with the virtual environment active, started in this order.
 
 | Terminal | Command | What you see |
 | --- | --- | --- |
 | 1 | `python -m src.processor` | `Cold start…`, then `Consuming machine-temperature…` and one line per batch |
-| 2 | `streamlit run dashboard/app.py` | open http://localhost:8501: "Waiting for data" |
-| 3 | `python -m src.producer --start-at "2013-12-10 00:00" --rate 10` | one progress line every 50 events |
+| 2 | `python -m src.forecaster` | `Consuming machine-temperature as group 'forecast'…`, then one line per forecast |
+| 3 | `streamlit run dashboard/app.py` | open http://localhost:8501: "Waiting for data" |
+| 4 | `python -m src.producer --start-at "2013-12-10 00:00" --rate 10` | one progress line every 50 events |
+
+The forecaster is optional (the core pipeline works without it). It needs 288 readings (24 h of event
+time, about 29 s at `--rate 10`) before its first forecast, then refits after every 12 new readings.
 
 Within seconds the curve starts to draw itself and the tiles change with no clicks. The first red
 points (readings the model flags) appear after about 27 s, at event time 10 Dec 22:40. About 3 minutes
@@ -128,6 +132,12 @@ python -m src.producer --resume                          # continue after Ctrl+C
   (12 readings), drops repeated or out-of-order timestamps, scores each polled batch with one model call
   (the first 12 readings after a cold start are never flagged), and writes the batch to MySQL in one
   transaction before committing the Kafka offsets. A restart never stores a reading twice.
+- **Forecaster** (extra): reads the same topic in its own consumer group `forecast`, keeps the last 288
+  readings, and after every 12 new readings fits ARIMA(1,1,1) and stores the next 12 readings with a 95%
+  interval in `forecasts`. Separate offsets mean it never slows the processor down (stop it, and only its
+  own lag grows).
+- **Hourly window** (in the processor): every batch is also grouped into fixed 1-hour windows of event
+  time (a tumbling window) and merged into `hourly_stats`: count, mean, min, max and flagged readings.
 - **Dashboard** (layer 6): one Streamlit fragment re-queries MySQL every 2 s (sidebar: 1 to 10 s, or
   pause). Every query goes to MySQL through `run_query()`; nothing is served from a cache.
 
@@ -159,6 +169,14 @@ counts how many windows reached so far got at least one flag.
 Consumer lag of the processor (`LAG` 0 means it has processed everything on the topic):
 ```bash
 docker exec broker /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group scoring
+```
+Both consumer groups, each with its own offsets (`scoring` = processor, `forecast` = forecaster):
+```bash
+docker exec broker /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --all-groups
+```
+The newest forecast and the newest hours:
+```bash
+docker exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SELECT * FROM forecasts ORDER BY target_time DESC LIMIT 5; SELECT * FROM hourly_stats ORDER BY hour_start DESC LIMIT 5"'
 ```
 Rows stored, duplicates and anomalies (`rows_stored` must equal `distinct_offsets`):
 ```bash
@@ -208,12 +226,12 @@ is the processor's batch log moving, and does every query in `dashboard/app.py` 
 ## Reset the demo (empty start)
 Stop the processor first. Then:
 ```bash
-python scripts/reset_demo.py      # recreate the topic, delete group "scoring", empty the tables, remove .producer_state
+python scripts/reset_demo.py      # recreate the topic, delete groups "scoring" and "forecast", empty all 4 tables, remove .producer_state
 ```
 Safe to run twice in a row.
 
 ## Stop
-Ctrl+C in the producer, processor and dashboard terminals, then:
+Ctrl+C in the producer, forecaster, processor and dashboard terminals, then:
 ```bash
 docker compose down               # keeps the data
 docker compose down -v            # also deletes the Kafka and MySQL volumes (next start: Setup steps 4-6 again)

@@ -7,14 +7,14 @@ processor computes rolling metrics, an IsolationForest flags abnormal readings, 
 and a Streamlit dashboard redraws itself every 2 seconds.
 
 ## Current state (update after every passed gate)
-- Last passed phase: **Phase 6 Evaluation** (2026-10-11). Earlier: Phase 5 `63398c7`, Phase 4 `2361911`, Phase 3 `d1015aa`, Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
-- **The project is submittable** (every technical checklist item is met). **Next step: Phase 7, forecaster and hourly
-  window (extra).** Its prompt is under "Phase 7 · Forecaster and hourly window (extra)" in the plan file; gate checks are
-  in `Resources/PHASES.md` § Phase 7. Contamination stays 0.01 unless the user decides otherwise after reading Phase 6.
+- Last passed phase: **Phase 7 Forecaster and hourly window** (2026-10-11). Earlier: Phase 6 `e71201a` (+ fix `5d31b3c`),
+  Phase 5 `63398c7`, Phase 4 `2361911`, Phase 3 `d1015aa`, Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
+- **The project is submittable** (every technical checklist item is met). **Next step: Phase 8, the demo runbook.**
+  Its prompt is under "Phase 8 · Demo" in the plan file; PHASES.md § Phase 8 has the demo sequence. Contamination stays 0.01.
 - The model is trained (`models/anomaly_model.joblib`, gitignored; retrain with `python -m src.train_model` on a fresh clone).
 - `.streamlit/secrets.toml` is generated (`python scripts/make_secrets.py`, gitignored).
-- After Phase 6, MySQL and the topic hold a 2,200-event replay from 2013-12-10 (left for the user's visual check of the
-  window shading). Before any gate run, use `python scripts/reset_demo.py` (stop the processor first).
+- After Phase 7, a replay from 2013-12-10 at --rate 10 was left running (processor, forecaster, dashboard, producer) for
+  the user's visual check. Before any gate run, stop them and use `python scripts/reset_demo.py`.
 - Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
@@ -41,6 +41,17 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   feature names differ), `make_consumer()`, `new_state()` (cold-start state, `warmup_left = 12`), `restore_state()` (also restores
   `anomalies_flagged`, sets `warmup_left = 0`), `process_batch(messages, features, state, model)` (one `predict` + one
   `decision_function` per batch), `main()`.
+- `src/forecaster.py`: consumer group `config.FORECAST_GROUP` ("forecast"), constants `HISTORY=288`, `EVERY=12`,
+  `HORIZON=12`, `ORDER=(1,1,1)`, `STEP=5 min`; `new_state()`, `fit_forecast(temps)` -> (mean, lower, upper) or None (input
+  must be finite; exceptions and non-finite output also give None and a log line), `forecast_rows(made_at, mean, lower,
+  upper)`, `handle_batch(messages, state, fit=fit_forecast)` (drop rule, fit when the window is full and >= 12 new
+  readings), `make_consumer()`, `main()` (checks.connect_mysql/require_topic 60 s, commit after `db.write_forecasts`).
+- `src/processor.py` also has `hourly_rows(rows)` (one dict per event-time hour of the batch); `main()` passes it to
+  `db.write_batch(conn, readings, metrics, hourly)`, which merges it into hourly_stats in the same transaction.
+- `src/db.py` also has `UPSERT_HOURLY`, `UPSERT_FORECAST`, `write_forecasts(conn, rows)`; `empty_tables` empties all 4 tables.
+- `scripts/reset_demo.py` deletes both consumer groups (`scoring`, `forecast`).
+- `dashboard/app.py` (Phase 7): `load_forecast()` (newest made_at_event_time, 12 rows), `load_hourly()` (last 48 h),
+  `forecast_layers()` (grey dashed line + 95% band, `clip=True`) on the curve, `show_hourly()` red bars per hour.
 - `scripts/evaluate.py`: `load_stream()` (csv + float(), like the producer), `load_windows()`, `accept_in_order()` (the
   processor's drop rule), `stream_model_rows()`, `isolation_forest_flags(train, stream, c)`, `without_warm_up()`,
   `zscore_flags(temps, cutoff, history=288)`, `score_against_windows(times, flags, windows)`, `markdown_table()`,
@@ -57,7 +68,9 @@ and a Streamlit dashboard redraws itself every 2 seconds.
 - `scripts/reset_demo.py`: recreate topic, delete group `scoring`, empty tables, remove `.producer_state`. Safe to run twice.
 - `tests/test_checks.py` (4 tests: retry succeeds after failures, gives up with one sentence, `wait_s=0` tries once,
   unexpected errors are not hidden). `tests/test_evaluate.py` (5 hand-calculated tests: inside/outside/delay scoring,
-  drop rule, z-score flag / no flag / flat history). Total: 21 tests.
+  drop rule, z-score flag / no flag / flat history). `tests/test_hourly.py` (2: hour grouping incl. a boundary at :00),
+  `tests/test_forecaster.py` (6: 5-min targets, 12 values inside the interval, a raising fit and NaN/inf windows give None,
+  first fit at reading 288 then every 12, repeats skipped). Total: 29 tests.
 - `tests/test_features.py` (5 hand-calculated tests), `tests/test_scoring.py` (7 tests: train/serve rows identical, warm-up
   across batches, no warm-up after restore, one call per batch, missing/old model refused; uses a `FakeModel` that records
   its input) + `pytest.ini` (`pythonpath = .`, so plain `pytest` works).
@@ -76,6 +89,7 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 | KAFKA_TOPIC | `KAFKA_TOPIC` (str) | machine-temperature |
 | SENSOR_ID | `SENSOR_ID` (str) | machine-1 |
 | CONSUMER_GROUP | `CONSUMER_GROUP` (str) | scoring |
+| FORECAST_GROUP | `FORECAST_GROUP` (str) | forecast (Phase 7) |
 | MYSQL_HOST / MYSQL_PORT | `MYSQL_HOST` (str) / `MYSQL_PORT` (int) | 127.0.0.1 / 3307 |
 | MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD | same names (str) | machine_monitor / monitor / (in .env) |
 | MYSQL_ROOT_PASSWORD | not exposed (used only by docker-compose.yml) | (in .env) |
@@ -185,6 +199,27 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   curve has a rect layer for Window 2 clipped to the shown range; toggle off removes it. After the rest of the stream
   (--resume): "4 of 4", and no rect in the last 288 readings (no window there). Starting at 2013-12-10 instead of seq 2000
   gives 275 flags, not 284, because the cold-start warm-up then falls on different readings.
+
+## Forecaster and hourly-window decisions from Phase 7 (keep them)
+- ARIMA (statsmodels 0.15): `ARIMA(list, order=(1,1,1)).fit()`, `get_forecast(steps=12)`, `.predicted_mean`,
+  `.conf_int(alpha=0.05)`; with a plain list (no date index) `steps` must be an int. Fit + forecast takes 20-35 ms
+  (about 100 ms for the first fit in a process). Warnings are silenced inside the fit.
+- statsmodels does NOT raise on an empty or all-NaN series (it forecasts zeros) and turns inf into NaN forecasts, so
+  `fit_forecast` checks the input is finite and the output is finite. The stream itself never holds NaN (producer skips).
+- Forecasts made every 12 readings with a 12-step horizon do not overlap, so "replace any earlier forecast for the same
+  target_time" (upsert on target_time PK) only matters after a restart or replay. The newest forecast is always 5-60 min
+  ahead of the newest reading.
+- No window restore: after a restart the forecaster needs 288 new readings before its next forecast (PHASES.md lists this
+  as expected). It resumes from its own committed offset.
+- hourly_stats merge: avg is re-weighted by counts, min/max via LEAST/GREATEST, counts add. MySQL applies the
+  ON DUPLICATE KEY UPDATE assignments left to right (MySQL 8.4 manual, UPDATE statement), so `avg_temperature` is assigned
+  before `reading_count`. Same transaction as readings + metrics, and replayed offsets are skipped, so no double count.
+- Gate evidence (2026-10-11, replay from 2013-12-10 at --rate 10): first forecast at 10 Dec 23:55 = the 288th reading;
+  both groups listed with their own offsets (scoring 335/335 lag 0, forecast 335/336 lag 1); hourly_stats = a GROUP BY
+  recompute from readings for all 44 hours (528 readings; count/min/max/anomalies exact, avg diff 2.8e-14); the forecast
+  made at 11 Dec 00:55 refitted offline from the CSV gives identical numbers (diff 0.0); forecaster stopped -> forecast
+  lag 23 -> 140 -> 257 while scoring stayed 0; restarted -> caught up to lag 0 and forecast again; AppTest: curve chart has
+  area + dashed line (12 rows each) ahead of the newest reading, hourly bar chart with 48 bars, no exceptions.
 
 ## How to run gate checks from Claude Code (lessons from Phase 2)
 - Run long-lived processes with `run_in_background` and `python -u` (unbuffered), so their log lines appear live.
@@ -319,7 +354,8 @@ A flag outside a labelled window is unlabelled, not proven false.
 ## Tables (database machine_monitor)
 - readings: id BIGINT AUTO_INCREMENT PK, kafka_offset BIGINT UNIQUE, seq INT, event_time DATETIME (indexed), temperature DOUBLE, rolling_avg DOUBLE, rolling_std DOUBLE, deviation DOUBLE, delta DOUBLE, anomaly_score DOUBLE NULL, is_anomaly TINYINT, produced_at DATETIME(3), stored_at DATETIME(3)
 - metrics_current: id TINYINT PK (always 1), last_event_time, last_temperature, rolling_avg, peak_temperature, min_temperature, events_processed, anomalies_flagged, late_events_dropped, pipeline_lag_ms, updated_at
-- Phase 7 adds hourly_stats (hour_start, reading_count, avg_temperature, min_temperature, max_temperature, anomaly_count) and forecasts (made_at_event_time, target_time, predicted_temperature, lower, upper).
+- hourly_stats: hour_start DATETIME PK, reading_count INT, avg_temperature, min_temperature, max_temperature DOUBLE, anomaly_count INT (Phase 7, written by the processor)
+- forecasts: target_time DATETIME PK, made_at_event_time DATETIME (indexed), predicted_temperature, lower, upper DOUBLE (Phase 7, written by the forecaster)
 
 ## Dashboard
 - Streamlit. Everything live sits inside one function decorated with st.fragment(run_every=...).
@@ -358,7 +394,7 @@ Mini_Project_DSA/
 │   ├── machine_temperature_system_failure.csv   ✓ identical to the NAB upstream file
 │   └── anomaly_windows.json   ✓ the 4 labelled windows from NAB
 ├── db/
-│   └── schema.sql             ✓ readings + metrics_current (Phase 7 adds 2 tables)
+│   └── schema.sql             ✓ readings, metrics_current, hourly_stats, forecasts
 ├── src/
 │   ├── __init__.py            ✓ makes `python -m src.<module>` work
 │   ├── config.py              ✓ reads .env, one place for every setting
@@ -368,7 +404,7 @@ Mini_Project_DSA/
 │   ├── features.py            ✓ RollingFeatures, shared by training and serving
 │   ├── processor.py           ✓ layers 3 and 4, live: window, score, store
 │   ├── train_model.py         ✓ layer 4, offline: fit and save the model
-│   └── forecaster.py          (Phase 7) extra: second consumer, ARIMA forecast
+│   └── forecaster.py          ✓ extra: second consumer group, ARIMA forecast
 ├── dashboard/
 │   └── app.py                 ✓ layer 6: Streamlit
 ├── scripts/
@@ -380,7 +416,9 @@ Mini_Project_DSA/
 │   ├── test_features.py       ✓ 5 hand-calculated feature tests
 │   ├── test_scoring.py        ✓ 7 tests: train/serve identical rows, warm-up, model loading
 │   ├── test_checks.py         ✓ 4 tests: retry loop and one-sentence exit
-│   └── test_evaluate.py       ✓ 5 tests: window scoring, drop rule, z-score baseline
+│   ├── test_evaluate.py       ✓ 5 tests: window scoring, drop rule, z-score baseline
+│   ├── test_hourly.py         ✓ 2 tests: 1-hour tumbling window
+│   └── test_forecaster.py     ✓ 6 tests: forecast rows, ARIMA wrapper, refit cadence
 └── report/
     ├── screenshots/           ✓ (empty)
     ├── evaluation.csv         ✓ comparison table (scripts/evaluate.py)
@@ -403,7 +441,7 @@ Every run:
 3. python -m src.processor
 4. streamlit run dashboard/app.py
 5. python -m src.producer   (options: --rate N, --start-at "YYYY-MM-DD HH:MM", --limit N, --resume)
-Phase 7 adds `python -m src.forecaster` (consumer group "forecast") alongside the processor.
+3b. python -m src.forecaster (optional extra, consumer group "forecast") alongside the processor
 
 ## Handy commands (for checking work, all tested)
 ```bash
@@ -464,6 +502,8 @@ The project is submittable after Phase 5. Phases 6 and 7 lift it above the minim
 - [x] Phase 6 Evaluation (gate passed 2026-10-11: 21 tests pass; evaluate.py reproduces every reference number (4 features
   0.01: 1.37%, 4 of 4, 201 outside; raw 36.46%, 6,282 outside) and its 0.01 row equals the saved model (284); both figures
   written and checked; dashboard shading + toggle + "2 of 2" / "4 of 4" line verified with AppTest on real data)
-- [ ] Phase 7 Forecaster and hourly window (extra)
+- [x] Phase 7 Forecaster and hourly window (gate passed 2026-10-11: 29 tests pass; both consumer groups with their own
+  offsets; hourly_stats equals a recompute from readings; a stored forecast equals an offline refit; stopping the forecaster
+  grows only its own lag; dashed forecast + band drawn ahead of the curve and hourly bars rendered (AppTest))
 - [ ] Phase 8 Demo
 - [ ] Phase 9 Report

@@ -36,3 +36,25 @@ CREATE TABLE IF NOT EXISTS metrics_current (
     pipeline_lag_ms     BIGINT NULL,
     updated_at          DATETIME(3) NULL
 );
+
+-- One row per hour of event time: a tumbling window (fixed, non-overlapping hours).
+-- The processor merges each batch into it. Feeds the anomalies-per-hour bar chart.
+CREATE TABLE IF NOT EXISTS hourly_stats (
+    hour_start      DATETIME PRIMARY KEY,   -- event_time rounded down to the hour
+    reading_count   INT NOT NULL,
+    avg_temperature DOUBLE NOT NULL,
+    min_temperature DOUBLE NOT NULL,
+    max_temperature DOUBLE NOT NULL,
+    anomaly_count   INT NOT NULL
+);
+
+-- One row per forecast point, written by the forecaster (consumer group forecast).
+-- A newer forecast for the same target_time replaces the older one. Feeds the dashed line.
+CREATE TABLE IF NOT EXISTS forecasts (
+    target_time           DATETIME PRIMARY KEY,   -- the event time being predicted
+    made_at_event_time    DATETIME NOT NULL,      -- event time of the newest reading the fit used
+    predicted_temperature DOUBLE NOT NULL,
+    lower                 DOUBLE NOT NULL,        -- 95% interval
+    upper                 DOUBLE NOT NULL,
+    KEY idx_forecasts_made_at (made_at_event_time)
+);

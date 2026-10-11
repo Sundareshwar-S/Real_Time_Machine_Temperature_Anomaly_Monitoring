@@ -18,6 +18,8 @@ KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "machine-temperature")
 SENSOR_ID = os.getenv("SENSOR_ID", "machine-1")
 CONSUMER_GROUP = os.getenv("CONSUMER_GROUP", "scoring")
+# The forecaster reads the same topic in its own group, so it keeps its own offsets.
+FORECAST_GROUP = os.getenv("FORECAST_GROUP", "forecast")
 
 # MySQL (layer 5)
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")

@@ -1,7 +1,7 @@
 """Put the pipeline back to an empty start, ready for a demo or a test run.
 
 1. Delete and recreate the Kafka topic (all old messages are gone).
-2. Delete the processor's consumer group, so it starts again from offset 0.
+2. Delete both consumer groups (processor and forecaster), so they start again from offset 0.
 3. Empty every MySQL table.
 4. Remove .producer_state, so the producer starts again from seq 2000.
 
@@ -38,8 +38,7 @@ def recreate_topic(admin):
     print(f"Created topic {topic} (1 partition)")
 
 
-def delete_consumer_group(admin):
-    group = config.CONSUMER_GROUP
+def delete_consumer_group(admin, group):
     # list_groups() returns one dict per group in kafka-python 3.x.
     if group not in [g["group_id"] for g in admin.list_groups()]:
         print(f"Consumer group {group} does not exist (nothing to delete)")
@@ -57,13 +56,14 @@ def main():
     admin = KafkaAdminClient(bootstrap_servers=config.KAFKA_BOOTSTRAP_SERVERS)
     try:
         recreate_topic(admin)
-        delete_consumer_group(admin)
+        for group in (config.CONSUMER_GROUP, config.FORECAST_GROUP):
+            delete_consumer_group(admin, group)
     finally:
         admin.close()
 
     with db.connect() as conn:
         db.empty_tables(conn)
-    print("Emptied tables readings and metrics_current")
+    print("Emptied tables readings, metrics_current, hourly_stats and forecasts")
 
     if config.PRODUCER_STATE.exists():
         config.PRODUCER_STATE.unlink()

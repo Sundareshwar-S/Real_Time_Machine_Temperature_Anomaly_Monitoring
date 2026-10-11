@@ -92,6 +92,21 @@ def load_recent_flags():
                      "WHERE is_anomaly = 1 ORDER BY id DESC LIMIT :n", n=RECENT_FLAGS)
 
 
+def load_forecast():
+    # The newest forecast (12 points). Older forecasts for later target times are
+    # replaced as the forecaster refits, so one made_at_event_time = one forecast.
+    return run_query("SELECT made_at_event_time, target_time, predicted_temperature, lower, upper FROM forecasts "
+                     "WHERE made_at_event_time = (SELECT MAX(made_at_event_time) FROM forecasts) "
+                     "ORDER BY target_time")
+
+
+def load_hourly():
+    # The last 48 hours of event time from the processor's tumbling 1-hour windows.
+    return run_query("SELECT hour_start, reading_count, anomaly_count FROM hourly_stats "
+                     "WHERE hour_start > (SELECT MAX(hour_start) FROM hourly_stats) - INTERVAL 48 HOUR "
+                     "ORDER BY hour_start")
+
+
 def load_flag_times():
     # Every flagged event_time: a few hundred rows at most, even after a full replay.
     return run_query("SELECT event_time FROM readings WHERE is_anomaly = 1")
@@ -135,7 +150,34 @@ def show_kpis(m):
                     help="Time from the producer sending the newest reading to MySQL storing it.")
 
 
-def show_curve(df):
+def forecast_layers(forecast):
+    """The ARIMA forecast: a dashed line with its 95% interval as a faint band.
+
+    clip=True keeps the band inside the fixed 0-115 axis when the interval is
+    wide, for example during the collapse on 16 Dec.
+    """
+    base = alt.Chart(forecast).encode(x="target_time:T")
+    band = base.mark_area(color="gray", opacity=0.2, clip=True).encode(
+        y=alt.Y("lower:Q").scale(domain=Y_DOMAIN), y2="upper:Q")
+    line = base.mark_line(color="gray", strokeDash=[6, 4], clip=True).encode(
+        y=alt.Y("predicted_temperature:Q").scale(domain=Y_DOMAIN),
+        tooltip=[alt.Tooltip("target_time:T", title="forecast for"),
+                 alt.Tooltip("predicted_temperature:Q", format=".1f", title="forecast"),
+                 alt.Tooltip("lower:Q", format=".1f"), alt.Tooltip("upper:Q", format=".1f")])
+    return [band, line]
+
+
+def show_hourly(hourly):
+    """Anomalies per hour of event time: the tumbling window, next to the sliding one on the curve."""
+    bars = alt.Chart(hourly).mark_bar(color="red").encode(
+        x=alt.X("hour_start:T", title="Hour of event time"),
+        y=alt.Y("anomaly_count:Q", title="Flagged readings").scale(domainMin=0),
+        tooltip=[alt.Tooltip("hour_start:T", title="hour"), "anomaly_count:Q", "reading_count:Q"])
+    st.altair_chart(bars.properties(height=180),
+                    alt="Number of flagged readings in each hour of the last 48 hours of event time")
+
+
+def show_curve(df, forecast):
     base = alt.Chart(df).encode(x=alt.X("event_time:T", title="Event time"))
     # Two lines from one data set: fold the two columns into (series, value) pairs
     # so Altair draws one coloured line per series, with a legend.
@@ -149,6 +191,8 @@ def show_curve(df):
         tooltip=["event_time:T", alt.Tooltip("temperature:Q", format=".1f")],
     )
     layers = [lines, flags]
+    if not forecast.empty:
+        layers += forecast_layers(forecast)
     if show_windows:
         # Only the windows that overlap the curve, clipped to its time range, so
         # the shading never stretches the x-axis beyond the readings shown.
@@ -198,7 +242,21 @@ def draw_live():
 
     with st.container(border=True):
         st.subheader(f"Newest {curve_rows} readings")
-        show_curve(load_curve(curve_rows))
+        forecast = load_forecast()
+        show_curve(load_curve(curve_rows), forecast)
+        if forecast.empty:
+            st.caption("No forecast yet: the forecaster needs 288 readings (24 h of event time) for its first fit.")
+        else:
+            st.caption(f"Dashed grey: ARIMA(1,1,1) forecast of the next hour, made at event time "
+                       f"{forecast['made_at_event_time'].iloc[0]:%d %b %H:%M}; grey band = 95% interval.")
+
+    with st.container(border=True):
+        st.subheader("Anomalies per hour (last 48 hours of event time)")
+        hourly = load_hourly()
+        if hourly.empty:
+            st.caption("No hours stored yet.")
+        else:
+            show_hourly(hourly)
 
     with st.container(border=True):
         st.subheader(f"Last {RECENT_FLAGS} flagged readings")

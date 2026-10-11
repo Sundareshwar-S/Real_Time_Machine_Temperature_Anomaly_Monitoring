@@ -42,6 +42,37 @@ UPSERT_METRICS = """
 """
 
 
+# Merge one hour of a batch into hourly_stats. The stored hour may already hold
+# readings from earlier batches, so counts add up, min/max compare, and the
+# average is re-weighted by the counts. MySQL applies these assignments left to
+# right (a later one sees the updated value), so avg_temperature must come
+# before reading_count changes.
+UPSERT_HOURLY = """
+    INSERT INTO hourly_stats
+        (hour_start, reading_count, avg_temperature, min_temperature, max_temperature, anomaly_count)
+    VALUES
+        (%(hour_start)s, %(reading_count)s, %(avg_temperature)s, %(min_temperature)s,
+         %(max_temperature)s, %(anomaly_count)s) AS new
+    ON DUPLICATE KEY UPDATE
+        avg_temperature = (hourly_stats.avg_temperature * hourly_stats.reading_count
+                           + new.avg_temperature * new.reading_count)
+                          / (hourly_stats.reading_count + new.reading_count),
+        reading_count = hourly_stats.reading_count + new.reading_count,
+        min_temperature = LEAST(hourly_stats.min_temperature, new.min_temperature),
+        max_temperature = GREATEST(hourly_stats.max_temperature, new.max_temperature),
+        anomaly_count = hourly_stats.anomaly_count + new.anomaly_count
+"""
+
+# A forecast point for a target_time that already has one replaces it.
+UPSERT_FORECAST = """
+    INSERT INTO forecasts (target_time, made_at_event_time, predicted_temperature, lower, upper)
+    VALUES (%s, %s, %s, %s, %s) AS new
+    ON DUPLICATE KEY UPDATE
+        made_at_event_time = new.made_at_event_time, predicted_temperature = new.predicted_temperature,
+        lower = new.lower, upper = new.upper
+"""
+
+
 def connect():
     """Open a new connection to the machine_monitor database."""
     return pymysql.connect(
@@ -71,17 +102,20 @@ def init_schema():
     return tables
 
 
-def write_batch(conn, readings, metrics):
+def write_batch(conn, readings, metrics, hourly=()):
     """Store one polled batch in a single transaction: all of it, or none of it.
 
     readings: list of tuples in READING_COLUMNS order (may be empty if every
     event in the batch was dropped as late). metrics: dict for metrics_current.
+    hourly: one dict per event-time hour touched by the batch (for hourly_stats).
     Returns the number of reading rows actually inserted.
     """
     try:
         with conn.cursor() as cur:
             inserted = cur.executemany(INSERT_READINGS, readings) if readings else 0
             cur.execute(UPSERT_METRICS, metrics)
+            if hourly:
+                cur.executemany(UPSERT_HOURLY, hourly)
         conn.commit()
     except Exception:
         # Leave the database exactly as it was before this batch, then let the
@@ -91,6 +125,18 @@ def write_batch(conn, readings, metrics):
             conn.rollback()
         raise
     return inserted or 0
+
+
+def write_forecasts(conn, rows):
+    """Store one forecast: rows of (target_time, made_at_event_time, predicted, lower, upper)."""
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(UPSERT_FORECAST, rows)
+        conn.commit()
+    except Exception:
+        if conn.open:
+            conn.rollback()
+        raise
 
 
 def fetch_latest_readings(conn, n=12):
@@ -114,7 +160,7 @@ def fetch_metrics(conn):
 def empty_tables(conn):
     """Delete every row from every pipeline table (used by scripts/reset_demo.py)."""
     with conn.cursor() as cur:
-        for table in ("readings", "metrics_current"):
+        for table in ("readings", "metrics_current", "hourly_stats", "forecasts"):
             cur.execute(f"TRUNCATE TABLE {table}")
     conn.commit()
 

@@ -5,8 +5,8 @@ every accepted reading plus the current KPIs to MySQL. This is where the state
 of the stream lives: the window, the running peak and minimum, and the counters.
 
 Loop: poll a batch -> drop late events -> update features -> score the batch
-with the IsolationForest -> write the batch to MySQL in one transaction ->
-commit the Kafka offsets.
+with the IsolationForest -> group it into 1-hour event-time windows -> write
+the batch to MySQL in one transaction -> commit the Kafka offsets.
 Offsets are committed only after MySQL has the data, so a crash can make a
 batch be read twice but never lost; the UNIQUE kafka_offset stops it being
 stored twice.
@@ -193,6 +193,31 @@ def process_batch(messages, features, state, model):
     return rows, newest, late, rolling_avg
 
 
+def hourly_rows(rows):
+    """Group a batch's reading rows into 1-hour tumbling windows of event time.
+
+    Tumbling = fixed, non-overlapping hours (10:00-10:59, 11:00-11:59, ...),
+    unlike the sliding 1-hour window behind rolling_avg, which moves with every
+    reading. Returns one dict per hour, ready to merge into hourly_stats.
+    """
+    hours = {}
+    for row in rows:
+        event_time, temperature, is_anomaly = row[2], row[3], row[9]
+        hour_start = event_time.replace(minute=0, second=0, microsecond=0)
+        hours.setdefault(hour_start, []).append((temperature, is_anomaly))
+    return [
+        {
+            "hour_start": hour_start,
+            "reading_count": len(readings),
+            "avg_temperature": sum(t for t, _ in readings) / len(readings),
+            "min_temperature": min(t for t, _ in readings),
+            "max_temperature": max(t for t, _ in readings),
+            "anomaly_count": sum(flag for _, flag in readings),
+        }
+        for hour_start, readings in sorted(hours.items())
+    ]
+
+
 def main():
     model = load_model()   # once, at startup: the stream never retrains
     # Wait up to 60 s for MySQL and Kafka, so the processor can be started
@@ -250,7 +275,7 @@ def main():
 
             # MySQL first, Kafka second: the offsets only move on once the data is safe.
             try:
-                db.write_batch(conn, [tuple(r) for r in rows], metrics)
+                db.write_batch(conn, [tuple(r) for r in rows], metrics, hourly_rows(rows))
             except pymysql.err.OperationalError as error:
                 # The offsets of this batch are not committed, so a restarted
                 # processor reads the batch again: nothing is lost.
