@@ -129,7 +129,7 @@ python -m src.producer --resume                          # continue after Ctrl+C
   (the first 12 readings after a cold start are never flagged), and writes the batch to MySQL in one
   transaction before committing the Kafka offsets. A restart never stores a reading twice.
 - **Dashboard** (layer 6): one Streamlit fragment re-queries MySQL every 2 s (sidebar: 1 to 10 s, or
-  pause). Every query uses `ttl=0`, so nothing is served from a cache.
+  pause). Every query goes to MySQL through `run_query()`; nothing is served from a cache.
 
 ## Evaluate the model against the labelled failures
 Offline (no Kafka or MySQL needed): replays the stream rows in memory exactly as the pipeline does and
@@ -202,7 +202,8 @@ Kafka and MySQL, so it can be started together with `docker compose up`.
 | Dashboard: `The tables do not exist yet` | schema not applied | `python -m src.db --init` |
 
 If the dashboard refreshes but the numbers do not move, check in this order: is the producer running,
-is the processor's batch log moving, and does every query in `dashboard/app.py` pass `ttl=0`.
+is the processor's batch log moving, and does every query in `dashboard/app.py` go through `run_query()`
+(nothing cached).
 
 ## Reset the demo (empty start)
 Stop the processor first. Then:

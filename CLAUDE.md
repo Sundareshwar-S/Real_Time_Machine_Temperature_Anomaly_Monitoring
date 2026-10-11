@@ -51,7 +51,8 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   "Labelled failure windows with at least one flag: X of Y reached so far" (Y = windows with start <= last_event_time).
 - `dashboard/app.py`: Streamlit page. Sidebar (refresh 1-10 s, curve rows 12-2016 default 288, pause toggle), then one
   fragment `live_view()` with `run_every=None if paused else refresh_s`: status line, 6 KPI tiles, Altair chart, last 10 flags.
-  Query helpers `load_metrics()`, `load_curve(n)`, `load_recent_flags()` all use `ttl=0, show_spinner=False`.
+  Query helpers `load_metrics()`, `load_curve(n)`, `load_recent_flags()`, `load_flag_times()` all call `run_query(sql, **params)`
+  (`with conn.engine.connect() as db: pd.read_sql(text(sql), db, params=params)`): no cache, connection returned at once.
 - `scripts/make_secrets.py`: writes `.streamlit/secrets.toml` (`[connections.mysql]`, dialect mysql, driver pymysql) from config.
 - `scripts/reset_demo.py`: recreate topic, delete group `scoring`, empty tables, remove `.producer_state`. Safe to run twice.
 - `tests/test_checks.py` (4 tests: retry succeeds after failures, gives up with one sentence, `wait_s=0` tries once,
@@ -123,7 +124,13 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 
 ## Dashboard decisions made in Phase 4 (keep them)
 - `st.connection("mysql", type="sql")` reads `.streamlit/secrets.toml`; the dashboard does not import `src`.
-- Every query passes `ttl=0` (otherwise cached forever) and `show_spinner=False` (otherwise a spinner flashes every refresh).
+- Every query goes through `run_query()`, not `conn.query()` (changed in Phase 6 with the user's approval). Root cause,
+  confirmed: `SQLConnection.query()` calls `self._instance.connect()` and never closes it, so each query holds a pooled
+  connection until the garbage collector runs (5 queries -> 5 checked out; `gc.collect()` -> 0). The pool is 5 + 10
+  overflow; at 5 queries per 2 s refresh an AppTest run hit `QueuePool limit of size 5 overflow 10 reached` (30 s stall,
+  then a stack trace). With the with-block: 40 renders / 200 queries, 0 errors, MySQL connections 6 -> 7.
+  `conn.query(ttl=0)` also cached nothing; `run_query()` has no cache at all, so the viva point is "nothing is cached:
+  every refresh reads MySQL" (the guide's frozen-dashboard cause 2).
 - Status age = naive-UTC now minus `metrics_current.updated_at` (stored as naive UTC). Over 10 s -> warning.
 - The pause toggle sets `run_every=None`. Sidebar widgets are outside the fragment, so changing one reruns the whole
   script (Streamlit docs: "widget outside a fragment -> full script rerun") and the fragment picks up the new value.
@@ -316,10 +323,11 @@ A flag outside a labelled window is unlabelled, not proven false.
 
 ## Dashboard
 - Streamlit. Everything live sits inside one function decorated with st.fragment(run_every=...).
-- Database access through st.connection, with ttl=0 on every query (the connection caches forever by default).
+- Database access through st.connection (settings from secrets.toml), every query via `run_query()` with no cache
+  (st.connection's own `query()` caches forever by default and leaks pooled connections; see Phase 4/6 decisions).
 - The curve reads only the newest 288 rows (ORDER BY id DESC LIMIT n, then sorted ascending in pandas).
 - Y-axis fixed at 0-115. "Waiting for data" when tables are empty. A "No new data for N s" warning when updated_at is more than 10 s old.
-- If the dashboard looks frozen, check in this order: is the producer running, is the processor's batch log moving, does the query pass ttl=0.
+- If the dashboard looks frozen, check in this order: is the producer running, is the processor's batch log moving, is any query cached.
 
 ## Repository layout
 One file per layer, so each report section can point at exactly one script.

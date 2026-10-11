@@ -3,8 +3,8 @@
 The page is live for two reasons, and both are needed:
 1. New data keeps arriving: the producer and processor keep writing to MySQL.
 2. The view re-queries on its own: everything live sits in one fragment that
-   Streamlit reruns on a timer, and every query passes ttl=0 so it is never
-   answered from Streamlit's cache.
+   Streamlit reruns on a timer, and every query goes to MySQL (nothing is
+   answered from a cache).
 Stop the producer and the numbers freeze while the page keeps refreshing.
 
     python scripts/make_secrets.py      (once: database settings from .env)
@@ -18,6 +18,7 @@ from pathlib import Path
 import altair as alt
 import pandas as pd
 import streamlit as st
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from streamlit.errors import StreamlitAPIException
 
@@ -62,34 +63,38 @@ def load_windows():
     })
 
 
+def run_query(sql, **params):
+    """Run one SELECT against MySQL and return the rows as a DataFrame.
+
+    Not conn.query(): it caches results (forever unless ttl=0) and leaves each
+    pooled connection for the garbage collector to return. At 5 queries every
+    2 s that can exhaust the pool. The with-block hands the connection back at
+    once, and nothing is cached, so every refresh reads the current data.
+    """
+    with conn.engine.connect() as db:
+        return pd.read_sql(text(sql), db, params=params)
+
+
 def load_metrics():
-    # ttl=0: run the query every time. Without it Streamlit would keep showing
-    # the first result forever. show_spinner=False stops a spinner flashing on
-    # every refresh.
-    return conn.query("SELECT * FROM metrics_current WHERE id = 1", ttl=0, show_spinner=False)
+    return run_query("SELECT * FROM metrics_current WHERE id = 1")
 
 
 def load_curve(n):
     # Only the newest n rows, so the query stays fast however big the table gets.
     # Newest first by id, then put back in time order for the chart.
-    df = conn.query(
-        "SELECT event_time, temperature, rolling_avg, is_anomaly FROM readings ORDER BY id DESC LIMIT :n",
-        params={"n": n}, ttl=0, show_spinner=False,
-    )
+    df = run_query("SELECT event_time, temperature, rolling_avg, is_anomaly FROM readings "
+                   "ORDER BY id DESC LIMIT :n", n=n)
     return df.sort_values("event_time")
 
 
 def load_recent_flags():
-    return conn.query(
-        "SELECT event_time, temperature, rolling_avg, anomaly_score FROM readings "
-        "WHERE is_anomaly = 1 ORDER BY id DESC LIMIT :n",
-        params={"n": RECENT_FLAGS}, ttl=0, show_spinner=False,
-    )
+    return run_query("SELECT event_time, temperature, rolling_avg, anomaly_score FROM readings "
+                     "WHERE is_anomaly = 1 ORDER BY id DESC LIMIT :n", n=RECENT_FLAGS)
 
 
 def load_flag_times():
     # Every flagged event_time: a few hundred rows at most, even after a full replay.
-    return conn.query("SELECT event_time FROM readings WHERE is_anomaly = 1", ttl=0, show_spinner=False)
+    return run_query("SELECT event_time FROM readings WHERE is_anomaly = 1")
 
 
 def show_window_progress(last_event_time):
