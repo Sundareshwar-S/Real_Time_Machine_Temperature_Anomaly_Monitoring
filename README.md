@@ -165,6 +165,17 @@ A flag outside a labelled window is unlabelled, not proven false. The dashboard'
 "Show known failure windows" shades the same windows behind the live curve, and a line under the tiles
 counts how many windows reached so far got at least one flag.
 
+## Live demo and report material
+- `DEMO.md`: the step-by-step demo runbook (rehearsed and timed), with fallbacks and viva questions.
+- Report numbers: after a full replay with the processor and forecaster running (see "Expected after a full
+  replay" below), run
+  ```bash
+  python scripts/collect_results.py   # writes report/results.md from MySQL, Kafka offsets, the model and evaluation.csv
+  ```
+- `report/report_draft.md`: the report draft (abstract, architecture, dataset, the six layers with real code snippets,
+  ML model, dashboard, results, conclusion, sources). Its numbers come only from `report/results.md`,
+  `report/evaluation.csv` and `DEMO.md`; the TODO lines mark screenshots and the personal parts still to add.
+
 ## How to verify
 Consumer lag of the processor (`LAG` 0 means it has processed everything on the topic):
 ```bash

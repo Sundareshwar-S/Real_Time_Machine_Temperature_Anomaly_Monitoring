@@ -7,15 +7,15 @@ processor computes rolling metrics, an IsolationForest flags abnormal readings, 
 and a Streamlit dashboard redraws itself every 2 seconds.
 
 ## Current state (update after every passed gate)
-- Last passed phase: **Phase 7 Forecaster and hourly window** (2026-10-11). Earlier: Phase 6 `e71201a` (+ fix `5d31b3c`),
-  Phase 5 `63398c7`, Phase 4 `2361911`, Phase 3 `d1015aa`, Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
-- **The project is submittable** (every technical checklist item is met). **Next step: Phase 8, the demo runbook.**
-  Its prompt is under "Phase 8 · Demo" in the plan file; PHASES.md § Phase 8 has the demo sequence. Contamination stays 0.01.
+- **All ten phases are done** (2026-10-11). Phase 9 report material, Phase 8 `07c6575`, Phase 7 `7518ab5`, Phase 6 `e71201a`
+  (+ fix `5d31b3c`), Phase 5 `63398c7`, Phase 4 `2361911`, Phase 3 `d1015aa`, Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
+- **What is left is the student's own work:** screenshots into `report/screenshots/` (live dashboard, console consumer,
+  consumer groups, MySQL counts), the "What I learned" paragraph and name/course details in `report/report_draft.md`
+  (marked TODO), rewriting the draft in their own words, and a screen recording of the demo (DEMO.md).
 - The model is trained (`models/anomaly_model.joblib`, gitignored; retrain with `python -m src.train_model` on a fresh clone).
 - `.streamlit/secrets.toml` is generated (`python scripts/make_secrets.py`, gitignored).
-- Nothing is running (all stopped cleanly after the Phase 7 visual check). MySQL and the topic still hold that replay
-  (2,910 events from 2013-12-10, 60 flags, 164 forecasts, `.producer_state` = 4958). Before any gate run, use
-  `python scripts/reset_demo.py`.
+- Nothing is running. MySQL and the topic hold the Phase 9 full replay (20,695 sent, 20,683 stored, 284 flagged, 1,700
+  forecasts, both groups at lag 0) that `report/results.md` was collected from. Before a demo, use `python scripts/reset_demo.py`.
 - Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
@@ -65,6 +65,11 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   fragment `live_view()` with `run_every=None if paused else refresh_s`: status line, 6 KPI tiles, Altair chart, last 10 flags.
   Query helpers `load_metrics()`, `load_curve(n)`, `load_recent_flags()`, `load_flag_times()` all call `run_query(sql, **params)`
   (`with conn.engine.connect() as db: pd.read_sql(text(sql), db, params=params)`): no cache, connection returned at once.
+- `scripts/collect_results.py` (Phase 9): reads MySQL (SQLAlchemy from config), Kafka (`KafkaConsumer.end_offsets`,
+  `KafkaAdminClient.list_group_offsets({group: None})`), the saved model and report/evaluation.csv; writes report/results.md.
+- `report/report_draft.md` (Phase 9): the report draft; 12 code snippets checked verbatim against their files; every
+  number traced to report/results.md, report/evaluation.csv or DEMO.md.
+- `DEMO.md` (Phase 8): the live demo runbook with a rehearsal record.
 - `scripts/make_secrets.py`: writes `.streamlit/secrets.toml` (`[connections.mysql]`, dialect mysql, driver pymysql) from config.
 - `scripts/reset_demo.py`: recreate topic, delete group `scoring`, empty tables, remove `.producer_state`. Safe to run twice.
 - `tests/test_checks.py` (4 tests: retry succeeds after failures, gives up with one sentence, `wait_s=0` tries once,
@@ -221,6 +226,14 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   made at 11 Dec 00:55 refitted offline from the CSV gives identical numbers (diff 0.0); forecaster stopped -> forecast
   lag 23 -> 140 -> 257 while scoring stayed 0; restarted -> caught up to lag 0 and forecast again; AppTest: curve chart has
   area + dashed line (12 rows each) ahead of the newest reading, hourly bar chart with 48 bars, no exceptions.
+
+## Report numbers from Phase 9 (full replay at --rate 200 with processor + forecaster; report/results.md)
+- 20,695 sent in 103 s, 20,683 stored (= distinct offsets), 12 late, 284 flagged (1.37%), 4 of 4 windows (83 inside, 201
+  outside), peak 108.51 at 2013-12-26 15:45, minimum 2.08 at 2013-12-16 17:25; pipeline lag per reading avg 51.3 ms,
+  median 50, p95 73, max 148 ms; both groups lag 0; 1,700 ARIMA fits, 1-hour-ahead MAE 1.50 (median 0.95, max 51.90),
+  91.2% of actuals inside the 95% interval; 1,725 hours in hourly_stats.
+- Citations verified with Exa: NAB paper = Lavin & Ahmad, ICMLA 2015, pp. 38-44, doi 10.1109/ICMLA.2015.141
+  (arXiv:1510.03336); Isolation Forest = Liu, Ting & Zhou, ICDM 2008, pp. 413-422, doi 10.1109/ICDM.2008.17.
 
 ## How to run gate checks from Claude Code (lessons from Phase 2)
 - Run long-lived processes with `run_in_background` and `python -u` (unbuffered), so their log lines appear live.
@@ -415,6 +428,7 @@ Mini_Project_DSA/
 ├── scripts/
 │   ├── reset_demo.py          ✓ recreate topic, delete consumer group, empty tables
 │   ├── make_secrets.py        ✓ writes .streamlit/secrets.toml from .env
+│   ├── collect_results.py     ✓ writes report/results.md from the finished replay
 │   └── evaluate.py            ✓ extra: score flags against NAB labels, write the table and figures
 ├── models/                    ✓ anomaly_model.joblib (generated by train_model, gitignored)
 ├── tests/
@@ -429,8 +443,8 @@ Mini_Project_DSA/
     ├── evaluation.csv         ✓ comparison table (scripts/evaluate.py)
     ├── stream_flags.png       ✓ whole stream, windows shaded, flags in red
     ├── flags_outside_windows.png  ✓ bar chart per detector
-    ├── results.md             (Phase 9) real numbers
-    └── report_draft.md        (Phase 9) report draft
+    ├── results.md             ✓ real numbers (scripts/collect_results.py)
+    └── report_draft.md        ✓ report draft (TODO lines for screenshots and personal parts)
 ```
 .gitignore: .venv, .env, .producer_state, models/*.joblib, __pycache__, *.pyc, .pytest_cache, .streamlit/secrets.toml
 
@@ -514,4 +528,6 @@ The project is submittable after Phase 5. Phases 6 and 7 lift it above the minim
   forecast 28.6 s, decline 2 min 48 s, minimum 3 min 14 s (all as calculated); "No new data" 12.3 s after Ctrl+C with the
   page clock still moving; --resume continued with no gap or duplicates; proof commands run; DEMO.md corrected where
   reality differed. The user records the screen on their own run.)
-- [ ] Phase 9 Report
+- [x] Phase 9 Report (2026-10-11: full replay on a reset system; report/results.md written by scripts/collect_results.py;
+  report/report_draft.md with the guide's sections, 12 verbatim snippets (checked), every number traced to a measured
+  source (checked), verified citations, TODO lines for screenshots and the student's own reflection)
