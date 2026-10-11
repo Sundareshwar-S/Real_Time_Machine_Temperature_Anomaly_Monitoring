@@ -13,6 +13,15 @@ WINDOW_SIZE = 12
 FEATURE_NAMES = ["temperature", "deviation", "rolling_std", "delta"]
 
 
+def model_row(features):
+    """One model input row: the feature values in FEATURE_NAMES order.
+
+    Training and serving both build their rows with this, so the columns can
+    never end up in a different order on one side.
+    """
+    return [features[name] for name in FEATURE_NAMES]
+
+
 class RollingFeatures:
     """A sliding window over the last 12 accepted readings."""
 

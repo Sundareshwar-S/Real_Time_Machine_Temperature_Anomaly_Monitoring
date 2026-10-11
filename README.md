@@ -106,7 +106,7 @@ The first event of a fresh run is seq 2000, event_time `2013-12-09 19:55:00`, ke
 
 ## Run the tests
 ```bash
-pytest                            # hand-calculated checks of the rolling features
+pytest                            # rolling-feature maths, train/serve identical features, scoring rules
 ```
 
 ## Reset the demo (empty start)
@@ -116,13 +116,22 @@ python scripts/reset_demo.py      # recreate the topic, delete group "scoring", 
 ```
 Safe to run twice in a row.
 
-## Run the processor (layers 3 and 5)
-Start it before (or after) the producer, in its own terminal:
+## Train the model (layer 4, once)
+```bash
+python -m src.train_model         # writes models/anomaly_model.joblib (not committed)
+```
+It fits an IsolationForest on the first 2,000 rows only (2 to 9 Dec 2013), using the same
+`RollingFeatures` class the processor uses. Retrain after any scikit-learn upgrade: the processor
+refuses a model saved by another scikit-learn version.
+
+## Run the processor (layers 3, 4 and 5)
+Train the model first. Then start the processor before (or after) the producer, in its own terminal:
 ```bash
 python -m src.processor           # Ctrl+C stops after the current batch
 ```
 It reads the topic as consumer group `scoring`, keeps a 1-hour rolling window (12 readings),
-drops repeated or out-of-order timestamps, and writes each batch to MySQL in one transaction
+drops repeated or out-of-order timestamps, scores each batch with the model (the first 12 readings
+after a cold start are never flagged), and writes each batch to MySQL in one transaction
 before committing the Kafka offsets. On restart it picks up where it stopped (window and counters
 are restored from MySQL), so a restart never stores a reading twice.
 
@@ -130,6 +139,12 @@ Watch the data arrive:
 ```bash
 docker exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM readings; SELECT * FROM metrics_current\G"'
 docker exec broker /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group scoring
+```
+
+Flags per day (the Phase 3 check: reset, start the processor, then
+`python -m src.producer --start-at "2013-12-10 00:00" --rate 50 --limit 2200`; expect flags on 10 and 16 Dec):
+```bash
+docker exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SELECT DATE(event_time) AS day, COUNT(*) AS flags FROM readings WHERE is_anomaly = 1 GROUP BY day ORDER BY day"'
 ```
 
 ## Stop

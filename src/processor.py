@@ -4,8 +4,9 @@ Reads events from Kafka, keeps a 1-hour sliding window in memory, and writes
 every accepted reading plus the current KPIs to MySQL. This is where the state
 of the stream lives: the window, the running peak and minimum, and the counters.
 
-Loop: poll a batch -> drop late events -> update features -> write the batch
-to MySQL in one transaction -> commit the Kafka offsets.
+Loop: poll a batch -> drop late events -> update features -> score the batch
+with the IsolationForest -> write the batch to MySQL in one transaction ->
+commit the Kafka offsets.
 Offsets are committed only after MySQL has the data, so a crash can make a
 batch be read twice but never lost; the UNIQUE kafka_offset stops it being
 stored twice.
@@ -13,12 +14,17 @@ stored twice.
     python -m src.processor          (Ctrl+C stops after the current batch)
 """
 import signal
+import sys
+import warnings
 from datetime import datetime, timezone
 
+import joblib
+import sklearn
 from kafka import DefaultSerializer, JsonSerializer, KafkaConsumer
+from sklearn.exceptions import InconsistentVersionWarning
 
 from src import config, db
-from src.features import RollingFeatures
+from src.features import FEATURE_NAMES, WINDOW_SIZE, RollingFeatures, model_row
 
 # Set by Ctrl+C (SIGINT) or SIGTERM. The loop checks it between batches, so
 # a batch is never cut in half.
@@ -55,19 +61,46 @@ def make_consumer():
     )
 
 
-def restore_state(conn, features):
-    """Pick up where the last run stopped, using what MySQL already holds.
+def load_model():
+    """Load the trained model once, or stop with one clear sentence."""
+    if not config.MODEL_PATH.exists():
+        sys.exit(f"Model file {config.MODEL_PATH} not found. Train it first: python -m src.train_model")
+    with warnings.catch_warnings():
+        # scikit-learn warns when a model was saved by another version; the
+        # check below turns that into one clear sentence instead.
+        warnings.simplefilter("ignore", InconsistentVersionWarning)
+        saved = joblib.load(config.MODEL_PATH)
+    if saved["sklearn_version"] != sklearn.__version__:
+        sys.exit(f"The model was saved with scikit-learn {saved['sklearn_version']} but "
+                 f"{sklearn.__version__} is installed. Retrain it: python -m src.train_model")
+    if saved["feature_names"] != FEATURE_NAMES:
+        sys.exit(f"The model was trained on {saved['feature_names']}, not {FEATURE_NAMES}. "
+                 "Retrain it: python -m src.train_model")
+    return saved["model"]
 
-    Returns the state dict the loop keeps between batches.
-    """
-    state = {
+
+def new_state():
+    """The state of a processor that has never stored anything (a cold start)."""
+    return {
         "last_event_time": None,   # newest accepted event_time (for the late-event check)
         "last_offset": -1,         # newest stored kafka_offset (for skipping replays)
         "peak": None,
         "minimum": None,
         "events_processed": 0,
+        "anomalies_flagged": 0,
         "late_events_dropped": 0,
+        # The first 12 readings only fill the window, so they are never flagged
+        # (training skipped them too).
+        "warmup_left": WINDOW_SIZE,
     }
+
+
+def restore_state(conn, features):
+    """Pick up where the last run stopped, using what MySQL already holds.
+
+    Returns the state dict the loop keeps between batches.
+    """
+    state = new_state()
     latest = db.fetch_latest_readings(conn, 12)
     metrics = db.fetch_metrics(conn)
     if not latest or metrics is None:
@@ -82,21 +115,26 @@ def restore_state(conn, features):
     state["peak"] = metrics["peak_temperature"]
     state["minimum"] = metrics["min_temperature"]
     state["events_processed"] = metrics["events_processed"]
+    state["anomalies_flagged"] = metrics["anomalies_flagged"]
     state["late_events_dropped"] = metrics["late_events_dropped"]
+    # The window came back full, so there is nothing left to warm up.
+    state["warmup_left"] = 0
     print(
         f"Restored: window of {len(features.window)} readings, last event_time {state['last_event_time']}, "
         f"last offset {state['last_offset']}, {state['events_processed']} processed, "
-        f"{state['late_events_dropped']} late dropped"
+        f"{state['anomalies_flagged']} flagged, {state['late_events_dropped']} late dropped"
     )
     return state
 
 
-def process_batch(messages, features, state):
-    """Turn one polled batch into reading rows. Updates `state` in place.
+def process_batch(messages, features, state, model):
+    """Turn one polled batch into scored reading rows. Updates `state` in place.
 
     Returns (rows, newest accepted event, number dropped as late, rolling_avg).
     """
     rows = []
+    model_rows = []   # the model's input, one row per accepted reading
+    warming_up = []   # True for readings that only fill the window
     newest = None
     late = 0
     rolling_avg = None
@@ -123,12 +161,28 @@ def process_batch(messages, features, state):
         state["events_processed"] += 1
         newest = event
 
-        # No ML yet (Phase 3): anomaly_score is NULL and is_anomaly is 0.
+        model_rows.append(model_row(f))
+        warming_up.append(state["warmup_left"] > 0)
+        if state["warmup_left"] > 0:
+            state["warmup_left"] -= 1
+
+        # anomaly_score and is_anomaly are filled in below, after scoring.
         # stored_at is filled in just before the write.
         rows.append([
             message.offset, event["seq"], event_time, temperature, f["rolling_avg"], f["rolling_std"],
             f["deviation"], f["delta"], None, 0, parse_produced_at(event["produced_at"]), None,
         ])
+
+    if rows:
+        # One call each for the whole batch: a call costs about the same for
+        # 1 row as for 20, so scoring row by row would fall behind at high rates.
+        predictions = model.predict(model_rows)
+        scores = model.decision_function(model_rows)
+        for row, prediction, score, warm_up in zip(rows, predictions, scores, warming_up):
+            row[8] = float(score)   # negative = anomalous
+            row[9] = 1 if prediction == -1 and not warm_up else 0
+            state["anomalies_flagged"] += row[9]
+
     state["late_events_dropped"] += late
     return rows, newest, late, rolling_avg
 
@@ -137,6 +191,7 @@ def main():
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
+    model = load_model()   # once, at startup: the stream never retrains
     conn = db.connect()
     features = RollingFeatures()
     state = restore_state(conn, features)
@@ -154,7 +209,7 @@ def main():
                 continue
             batch_number += 1
 
-            rows, newest, late, rolling_avg = process_batch(messages, features, state)
+            rows, newest, late, rolling_avg = process_batch(messages, features, state, model)
             stored_at = utc_now()
             for row in rows:
                 row[-1] = stored_at
@@ -171,7 +226,7 @@ def main():
                 "peak_temperature": state["peak"],
                 "min_temperature": state["minimum"],
                 "events_processed": state["events_processed"],
-                "anomalies_flagged": 0,
+                "anomalies_flagged": state["anomalies_flagged"],
                 "late_events_dropped": state["late_events_dropped"],
                 "pipeline_lag_ms": lag_ms,
                 "updated_at": stored_at,
@@ -190,6 +245,9 @@ def main():
             consumer.commit()
 
             line = f"batch {batch_number}: {len(rows)} stored"
+            flagged = sum(row[9] for row in rows)
+            if flagged:
+                line += f", {flagged} flagged"
             if late:
                 line += f", {late} late dropped"
             if newest is not None:
@@ -200,7 +258,7 @@ def main():
         conn.close()
         print(
             f"Processor stopped cleanly: {state['events_processed']} processed, "
-            f"{state['late_events_dropped']} late dropped."
+            f"{state['anomalies_flagged']} flagged, {state['late_events_dropped']} late dropped."
         )
 
 

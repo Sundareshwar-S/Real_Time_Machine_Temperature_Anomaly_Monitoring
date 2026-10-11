@@ -7,10 +7,11 @@ processor computes rolling metrics, an IsolationForest flags abnormal readings, 
 and a Streamlit dashboard redraws itself every 2 seconds.
 
 ## Current state (update after every passed gate)
-- Last passed phase: **Phase 2 Processor and database** (commit `a0f8d98`, 2026-10-11). Earlier: Phase 1 `145079d`, Phase 0 `87a0b36`.
-- **Next step: Phase 3, the ML model.** Its prompt is under "Phase 3 · ML model (layer 4)" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 3.
-- The system is reset (verified: topic offset 0, no consumer groups, 0 rows in both tables, no `.producer_state`, nothing
-  running). Before any gate run, use `python scripts/reset_demo.py` (stop the processor first).
+- Last passed phase: **Phase 3 ML model** (2026-10-11). Earlier: Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
+- **Next step: Phase 4, the dashboard.** Its prompt is under "Phase 4 · Dashboard (layer 6)" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 4.
+- The model is trained (`models/anomaly_model.joblib`, gitignored; retrain with `python -m src.train_model` on a fresh clone).
+- MySQL and the topic still hold the Phase 3 gate run (2,200 rows, 60 flags, `.producer_state` = 4248). Before any gate
+  run, use `python scripts/reset_demo.py` (stop the processor first).
 - Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
@@ -22,10 +23,18 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   `fetch_latest_readings(conn, n=12)` (oldest first), `fetch_metrics(conn)` (dict or None), `empty_tables(conn)`.
 - `src/features.py`: `WINDOW_SIZE = 12`, `FEATURE_NAMES = ["temperature", "deviation", "rolling_std", "delta"]` (model column order),
   `RollingFeatures.update(t)` -> dict with the 4 features + `rolling_avg`; `RollingFeatures.restore(temps)` refills the window (oldest first).
-- `src/processor.py`: `make_consumer()`, `restore_state()`, `process_batch()`, `main()`. Phase 2 stores `anomaly_score` NULL and
-  `is_anomaly` 0; Phase 3 adds the model in `process_batch`/`main` (score the batch's feature rows with one call).
+- `src/features.py` also has `model_row(f)`: the feature dict -> list in `FEATURE_NAMES` order. Training and serving both use it.
+- `src/train_model.py`: `load_training_rows()` -> (event_time, temperature) for rows 0-1999, `build_training_rows(temps)` ->
+  model rows with the 12 warm-up rows dropped; model constants `N_ESTIMATORS`, `CONTAMINATION`, `RANDOM_STATE`.
+  Saves `{"model", "feature_names", "sklearn_version"}` with joblib.
+- `src/processor.py`: `load_model()` (exits with one sentence if the file is missing, the scikit-learn version differs or the
+  feature names differ), `make_consumer()`, `new_state()` (cold-start state, `warmup_left = 12`), `restore_state()` (also restores
+  `anomalies_flagged`, sets `warmup_left = 0`), `process_batch(messages, features, state, model)` (one `predict` + one
+  `decision_function` per batch), `main()`.
 - `scripts/reset_demo.py`: recreate topic, delete group `scoring`, empty tables, remove `.producer_state`. Safe to run twice.
-- `tests/test_features.py` (5 hand-calculated tests) + `pytest.ini` (`pythonpath = .`, so plain `pytest` works).
+- `tests/test_features.py` (5 hand-calculated tests), `tests/test_scoring.py` (7 tests: train/serve rows identical, warm-up
+  across batches, no warm-up after restore, one call per batch, missing/old model refused; uses a `FakeModel` that records
+  its input) + `pytest.ini` (`pythonpath = .`, so plain `pytest` works).
 - `db/schema.sql`: `readings` and `metrics_current`, applied and verified.
 - `data/anomaly_windows.json`: `{"source": url, "key": nab_key, "windows": [{"start": ..., "end": ...}, ...]}`,
   4 windows, timestamps formatted like `"2013-12-10 06:25:00.000000"`.
@@ -76,15 +85,16 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - A batch where every event is late still upserts metrics_current, keeping the last known temperature/rolling_avg/lag.
 - MySQL: `STORED` is a reserved word, so do not use it as a column alias in queries.
 
-## Where Phase 3 plugs in (from reading the Phase 2 code)
-- `process_batch()` builds one row list per accepted event in `db.READING_COLUMNS` order; the feature values are already
-  in each row and `anomaly_score` / `is_anomaly` sit at positions 8 and 9 (currently `None` and `0`).
-- Collect the feature rows of the batch in `FEATURE_NAMES` order, call `predict` and `decision_function` once each on the
-  whole batch, and fill positions 8 and 9. Count flags into `anomalies_flagged` (restore it from metrics_current like the
-  other counters; Phase 2 writes it as a constant 0 in `main()`).
-- Warm-up: `restore_state()` prints "Cold start" when MySQL is empty. Only after a cold start do the first 12 accepted
-  events keep `is_anomaly = 0`; after a restore the window is already full, so no warm-up is needed.
-- `train_model.py` must reuse `config.STREAM_START_SEQ` (2000) for the split and `RollingFeatures` for the features.
+## Model decisions made in Phase 3 (keep them)
+- The model is fitted on a plain list of lists (no DataFrame), and the processor scores a list of lists, so there are no
+  feature-name warnings. Column order is guarded three ways: `model_row()`, `FEATURE_NAMES` saved in the joblib file and
+  checked by `load_model()`, and the train/serve test.
+- Warm-up readings are still scored and their `anomaly_score` is stored; only `is_anomaly` is forced to 0. Warm-up counts
+  accepted readings across batches (`state["warmup_left"]`), not per batch.
+- `load_model()` silences scikit-learn's `InconsistentVersionWarning` and compares the saved version itself, so a version
+  mismatch gives one clear sentence instead of a warning followed by unsupported behaviour.
+- Training output (quote it in the report): rows 12-1999 (2013-12-02 22:15 to 2013-12-09 19:50), 1,988 rows, fitted in
+  0.19 s, the model flags 20 of its own 1,988 training rows (1.01%).
 
 ## How to run gate checks from Claude Code (lessons from Phase 2)
 - Run long-lived processes with `run_in_background` and `python -u` (unbuffered), so their log lines appear live.
@@ -111,7 +121,7 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   AND the view re-queries on its own. Pausing the producer must freeze the numbers while the page keeps refreshing.
 - Submission checklist:
   - [x] Streaming tool (Kafka) working (Phase 1: producer -> topic verified with the console consumer)
-  - [ ] ML algorithm trained and scoring live
+  - [x] ML algorithm trained and scoring live (Phase 3: IsolationForest trained offline, every batch scored in the processor)
   - [ ] Visualization auto-refreshing on a live data source
   - [x] Database serving layer between processor and dashboard (Phase 2: processor writes readings + metrics_current)
   - [ ] Full pipeline runs end to end; dashboard updates on its own
@@ -255,17 +265,18 @@ Mini_Project_DSA/
 │   ├── db.py                  ✓ connection, schema init, batch writes, state reads
 │   ├── producer.py            ✓ layer 1: CSV to Kafka, paced
 │   ├── features.py            ✓ RollingFeatures, shared by training and serving
-│   ├── processor.py           ✓ layer 3 now (window, store); layer 4 scoring added in Phase 3
-│   ├── train_model.py         (Phase 3) layer 4, offline: fit and save the model
+│   ├── processor.py           ✓ layers 3 and 4, live: window, score, store
+│   ├── train_model.py         ✓ layer 4, offline: fit and save the model
 │   └── forecaster.py          (Phase 7) extra: second consumer, ARIMA forecast
 ├── dashboard/
 │   └── app.py                 (Phase 4) layer 6: Streamlit
 ├── scripts/
 │   ├── reset_demo.py          ✓ recreate topic, delete consumer group, empty tables
 │   └── evaluate.py            (Phase 6) extra: score flags against NAB labels
-├── models/                    anomaly_model.joblib (Phase 3, generated, gitignored)
+├── models/                    ✓ anomaly_model.joblib (generated by train_model, gitignored)
 ├── tests/
-│   └── test_features.py       ✓ 5 hand-calculated feature tests
+│   ├── test_features.py       ✓ 5 hand-calculated feature tests
+│   └── test_scoring.py        ✓ 7 tests: train/serve identical rows, warm-up, model loading
 └── report/
     ├── screenshots/           ✓ (empty)
     ├── evaluation.csv         (Phase 6) comparison table
@@ -330,7 +341,10 @@ The project is submittable after Phase 5. Phases 6 and 7 lift it above the minim
 - [x] Phase 0 Setup (gate passed 2026-10-11: broker + mysql healthy, topic machine-temperature with 1 partition, tables readings + metrics_current, host lists topics via kafka-python)
 - [x] Phase 1 Producer (gate passed 2026-10-11: 5/s pacing confirmed from Kafka timestamps, --start-at -> seq 2049, --resume continues from saved seq, Ctrl+C saves state, bad-value guard tested, topic count = events sent)
 - [x] Phase 2 Processor and database (gate passed 2026-10-11: 5 tests pass; reset safe twice; count climbs 104 -> 180 in 3 s at 20/s; Ctrl+C restart and kill -9 restart: COUNT = DISTINCT offsets (1000 = 1000), rolling_avg/std match an independent pandas recompute to 1e-12; 12 repeats on 2014-01-07 dropped (seq 10149-10160); lag 0)
-- [ ] Phase 3 ML model
+- [x] Phase 3 ML model (gate passed 2026-10-11: 12 tests pass; trained on 1,988 rows, 1.01% of training flagged; replay from
+  2013-12-10, 2,200 events at 50/s: 60 flagged, 8 on 12-10 and 49 on 12-16 (exactly the reference), 1 on 12-15, 2 on 12-17,
+  all 60 inside labelled windows, first flag 2013-12-10 22:40; an independent pandas recompute gives identical flags and
+  scores; COUNT = DISTINCT = 2,200; lag 0; restart restores "60 flagged"; missing model file -> one sentence, exit 1)
 - [ ] Phase 4 Dashboard
 - [ ] Phase 5 End to end
 - [ ] Phase 6 Evaluation (extra)
