@@ -172,8 +172,9 @@ docker exec broker /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server lo
 ```
 Both consumer groups, each with its own offsets (`scoring` = processor, `forecast` = forecaster):
 ```bash
-docker exec broker /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --all-groups
+docker exec broker /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group scoring --group forecast
 ```
+(`--all-groups` works too, but also lists the throwaway groups that console consumers create.)
 The newest forecast and the newest hours:
 ```bash
 docker exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SELECT * FROM forecasts ORDER BY target_time DESC LIMIT 5; SELECT * FROM hourly_stats ORDER BY hour_start DESC LIMIT 5"'
@@ -196,7 +197,7 @@ Windows (PowerShell): run the same SQL through an interactive client, which asks
 Messages on the topic (the newest offset is the number of events sent):
 ```bash
 docker exec broker /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic machine-temperature
-docker exec -it broker /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic machine-temperature --from-beginning --property print.key=true
+docker exec -it broker /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic machine-temperature --from-beginning --formatter-property print.key=true
 ```
 
 **Expected after a full replay** (reset, processor, then `python -m src.producer --rate 200` with the

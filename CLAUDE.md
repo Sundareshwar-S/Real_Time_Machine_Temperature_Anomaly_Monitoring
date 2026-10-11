@@ -235,6 +235,10 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - pandas 3.0's default CSV float parser differs from Python `float()` in the last bit for some values (327 of 3,797
   stream rows, max 1.4e-14). The producer uses `float()`, so stored temperatures equal
   `pd.read_csv(..., float_precision="round_trip")`. Use that (or the csv module) for exact comparisons (Phase 6).
+- Kafka 4.3 console consumer: `--property` is deprecated, use `--formatter-property print.key=true`. Describe the two
+  groups with `--group scoring --group forecast`; `--all-groups` also lists throwaway `console-consumer-NNNNN` groups.
+- Kill background processes by exact PID (`ps -eo pid,args`), never `pgrep -f` with text that also appears in the
+  calling command (exit 144 = the shell killed itself; happened twice).
 - To stop Streamlit, match the process exactly (e.g. `pgrep -f "^.venv/bin/python .venv/bin/streamlit"` or kill the
   background task); a loose `pkill -f "streamlit run"` pattern also matches the calling shell.
 
@@ -379,7 +383,7 @@ Mini_Project_DSA/
 │   └── MINI_project_components_table.pdf   allowed tools per layer
 ├── CLAUDE.md                  ✓ project rules Claude Code reads every session
 ├── README.md                  ✓ setup and run order (grows every phase)
-├── DEMO.md                    (Phase 8) live demo runbook
+├── DEMO.md                    ✓ live demo runbook (rehearsed and timed)
 ├── docker-compose.yml         ✓ Kafka broker + MySQL
 ├── .env.example               ✓ ports, topic name, DB credentials
 ├── .env                       ✓ local copy of .env.example (gitignored)
@@ -506,5 +510,8 @@ The project is submittable after Phase 5. Phases 6 and 7 lift it above the minim
 - [x] Phase 7 Forecaster and hourly window (gate passed 2026-10-11: 29 tests pass; both consumer groups with their own
   offsets; hourly_stats equals a recompute from readings; a stored forecast equals an offline refit; stopping the forecaster
   grows only its own lag; dashed forecast + band drawn ahead of the curve and hourly bars rendered (AppTest))
-- [ ] Phase 8 Demo
+- [x] Phase 8 Demo (gate passed 2026-10-11: DEMO.md written for Ubuntu and rehearsed once, timed: first flag 27.2 s, first
+  forecast 28.6 s, decline 2 min 48 s, minimum 3 min 14 s (all as calculated); "No new data" 12.3 s after Ctrl+C with the
+  page clock still moving; --resume continued with no gap or duplicates; proof commands run; DEMO.md corrected where
+  reality differed. The user records the screen on their own run.)
 - [ ] Phase 9 Report
