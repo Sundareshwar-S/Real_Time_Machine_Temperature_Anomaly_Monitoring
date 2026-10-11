@@ -7,10 +7,10 @@ processor computes rolling metrics, an IsolationForest flags abnormal readings, 
 and a Streamlit dashboard redraws itself every 2 seconds.
 
 ## Current state (update after every passed gate)
-- Last passed phase: **Phase 2 Processor and database** (2026-10-11). Earlier: Phase 1 `145079d`, Phase 0 `87a0b36`.
+- Last passed phase: **Phase 2 Processor and database** (commit `a0f8d98`, 2026-10-11). Earlier: Phase 1 `145079d`, Phase 0 `87a0b36`.
 - **Next step: Phase 3, the ML model.** Its prompt is under "Phase 3 · ML model (layer 4)" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 3.
-- The system is reset (empty topic, no consumer group, empty tables, no `.producer_state`). Before any gate run, use
-  `python scripts/reset_demo.py` (stop the processor first).
+- The system is reset (verified: topic offset 0, no consumer groups, 0 rows in both tables, no `.producer_state`, nothing
+  running). Before any gate run, use `python scripts/reset_demo.py` (stop the processor first).
 - Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
@@ -53,8 +53,8 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 
 ## Library notes learned while building (kafka-python 3.0.11)
 - Serializers live in `kafka`: `DefaultSerializer()` (str <-> UTF-8 bytes) and `JsonSerializer()` (dict <-> JSON bytes).
-  The same classes deserialize, so the Phase 2 consumer can use `key_deserializer=DefaultSerializer()` and
-  `value_deserializer=JsonSerializer()` (confirm the consumer parameter names in Context7 before writing).
+  The same classes deserialize: the producer serializes with them and the processor's consumer uses
+  `key_deserializer=DefaultSerializer()` and `value_deserializer=JsonSerializer()` (checked in Context7, working).
 - 3.0 producer defaults: `acks='all'`, `enable_idempotence=True`, `linger_ms=0`. `send()` is asynchronous: call `flush()`
   before recording progress, as the producer does before writing `.producer_state`.
 - 3.0 removed `NoBrokersAvailable`. An unreachable broker shows up as a timeout (`kafka.errors.KafkaTimeoutError`,
@@ -75,6 +75,27 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   (not re-stored, not counted as late). This assumes topic and tables are reset together, as reset_demo.py does.
 - A batch where every event is late still upserts metrics_current, keeping the last known temperature/rolling_avg/lag.
 - MySQL: `STORED` is a reserved word, so do not use it as a column alias in queries.
+
+## Where Phase 3 plugs in (from reading the Phase 2 code)
+- `process_batch()` builds one row list per accepted event in `db.READING_COLUMNS` order; the feature values are already
+  in each row and `anomaly_score` / `is_anomaly` sit at positions 8 and 9 (currently `None` and `0`).
+- Collect the feature rows of the batch in `FEATURE_NAMES` order, call `predict` and `decision_function` once each on the
+  whole batch, and fill positions 8 and 9. Count flags into `anomalies_flagged` (restore it from metrics_current like the
+  other counters; Phase 2 writes it as a constant 0 in `main()`).
+- Warm-up: `restore_state()` prints "Cold start" when MySQL is empty. Only after a cold start do the first 12 accepted
+  events keep `is_anomaly = 0`; after a restore the window is already full, so no warm-up is needed.
+- `train_model.py` must reuse `config.STREAM_START_SEQ` (2000) for the split and `RollingFeatures` for the features.
+
+## How to run gate checks from Claude Code (lessons from Phase 2)
+- Run long-lived processes with `run_in_background` and `python -u` (unbuffered), so their log lines appear live.
+- Foreground `sleep` is blocked: wait for a condition with a background `until ...; do sleep 1; done` loop that also
+  stops on errors and after a time limit.
+- Find the processor PID with `pgrep -f "^.venv/bin/python -u -m src.processor"`. A looser pattern also matches the
+  shell running pgrep itself.
+- Never fire dependent steps as parallel tool calls: if the reset fails, the steps after it run against a half-reset
+  system. In Phase 2 this made the processor skip new messages (new offsets 0-39 were below the stored last offset 999).
+- Prove results independently where possible (e.g. recompute rolling stats with pandas, not RollingFeatures).
+  `pd.read_sql` on a PyMySQL connection works but warns; use SQLAlchemy for real code (Phase 4 does).
 
 ## Project docs (read these when a detail is missing here)
 - `Resources/Machine Temperature Streaming Analytics Mini-Project Plan.md`: the full design, the evaluation table, and the exact prompt for each phase. This is the source of truth.
@@ -260,6 +281,7 @@ One-time setup (already done on this machine; full commands in README.md "Setup"
 
 Every run:
 1. docker compose up -d
+   (fresh start: `python scripts/reset_demo.py` with the processor stopped; tests: `pytest`)
 2. python -m src.train_model (once)
 3. python -m src.processor
 4. streamlit run dashboard/app.py
