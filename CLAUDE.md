@@ -13,8 +13,9 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   Its prompt is under "Phase 8 · Demo" in the plan file; PHASES.md § Phase 8 has the demo sequence. Contamination stays 0.01.
 - The model is trained (`models/anomaly_model.joblib`, gitignored; retrain with `python -m src.train_model` on a fresh clone).
 - `.streamlit/secrets.toml` is generated (`python scripts/make_secrets.py`, gitignored).
-- After Phase 7, a replay from 2013-12-10 at --rate 10 was left running (processor, forecaster, dashboard, producer) for
-  the user's visual check. Before any gate run, stop them and use `python scripts/reset_demo.py`.
+- Nothing is running (all stopped cleanly after the Phase 7 visual check). MySQL and the topic still hold that replay
+  (2,910 events from 2013-12-10, 60 flags, 164 forecasts, `.producer_state` = 4958). Before any gate run, use
+  `python scripts/reset_demo.py`.
 - Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
