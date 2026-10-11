@@ -87,7 +87,8 @@ def write_batch(conn, readings, metrics):
         # Leave the database exactly as it was before this batch, then let the
         # caller see the error. The Kafka offsets are not committed either, so
         # the batch will be read again.
-        conn.rollback()
+        if conn.open:   # a connection that has died has nothing left to roll back
+            conn.rollback()
         raise
     return inserted or 0
 

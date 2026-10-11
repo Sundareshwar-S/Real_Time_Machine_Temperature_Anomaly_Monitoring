@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from kafka import DefaultSerializer, JsonSerializer, KafkaProducer
 
-from src import config
+from src import checks, config
 
 PROGRESS_EVERY = 50  # print progress and save state every 50 events
 
@@ -92,8 +92,12 @@ def main():
     if not rows:
         sys.exit("No rows left to send from that starting point.")
 
+    # Stop with one clear sentence if Kafka is down or the topic is missing.
+    checks.require_topic()
     producer = KafkaProducer(
         bootstrap_servers=config.KAFKA_BOOTSTRAP_SERVERS,
+        # Never let a send create the topic by accident (the broker would allow it).
+        allow_auto_create_topics=False,
         key_serializer=DefaultSerializer(),  # the key "machine-1" as UTF-8 bytes
         value_serializer=JsonSerializer(),   # the event dict as JSON bytes
     )

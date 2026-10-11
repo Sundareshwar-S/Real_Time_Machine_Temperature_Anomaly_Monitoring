@@ -13,7 +13,10 @@ Stop the producer and the numbers freeze while the page keeps refreshing.
 from datetime import datetime, timezone
 
 import altair as alt
+import pandas as pd
 import streamlit as st
+from sqlalchemy.exc import OperationalError, ProgrammingError
+from streamlit.errors import StreamlitAPIException
 
 STALE_AFTER_S = 10      # older than this, the status line warns that no new data arrives
 Y_DOMAIN = [0, 115]     # fixed temperature axis, so the chart does not jump between refreshes
@@ -30,7 +33,12 @@ with st.sidebar:
     paused = st.toggle("Pause refresh", help="Stops the timed refresh. The data keeps arriving in MySQL.")
 
 # Database settings come from .streamlit/secrets.toml ([connections.mysql]).
-conn = st.connection("mysql", type="sql")
+try:
+    conn = st.connection("mysql", type="sql")
+except StreamlitAPIException:
+    st.error("Database settings not found in .streamlit/secrets.toml. "
+             "Create the file with: python scripts/make_secrets.py, then reload this page.")
+    st.stop()
 
 
 def load_metrics():
@@ -107,6 +115,24 @@ def show_curve(df):
 @st.fragment(run_every=None if paused else refresh_s)
 def live_view():
     """Everything that changes. Only this function reruns on the timer."""
+    # A failed query shows one sentence instead of a stack trace. The fragment
+    # keeps its timer, so the page recovers by itself once the problem is fixed.
+    try:
+        draw_live()
+    except (OperationalError, ProgrammingError, pd.errors.DatabaseError) as error:
+        # pandas wraps an error raised while a query runs in its own
+        # DatabaseError; the database's original error is its __cause__.
+        cause = error.__cause__ if isinstance(error, pd.errors.DatabaseError) else error
+        if isinstance(cause, OperationalError):
+            st.error(f"Cannot reach MySQL at {conn.engine.url.host}:{conn.engine.url.port}. "
+                     "Start it with: docker compose up -d. This page keeps retrying.")
+        elif isinstance(cause, ProgrammingError):
+            st.error("The tables do not exist yet. Create them with: python -m src.db --init")
+        else:
+            raise
+
+
+def draw_live():
     metrics = load_metrics()
     if metrics.empty:
         st.info("Waiting for data. Start the processor, then the producer.", icon=":material/hourglass_empty:")

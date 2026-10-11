@@ -7,12 +7,14 @@ processor computes rolling metrics, an IsolationForest flags abnormal readings, 
 and a Streamlit dashboard redraws itself every 2 seconds.
 
 ## Current state (update after every passed gate)
-- Last passed phase: **Phase 4 Dashboard** (2026-10-11). Earlier: Phase 3 `d1015aa`, Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
-- **Next step: Phase 5, end to end.** Its prompt is under "Phase 5 · End to end" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 5.
+- Last passed phase: **Phase 5 End to end** (2026-10-11). Earlier: Phase 4 `2361911`, Phase 3 `d1015aa`, Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
+- **The project is submittable** (every technical checklist item is met). **Next step: Phase 6, evaluation (extra).**
+  Its prompt is under "Phase 6 · Evaluation (extra)" in the plan file; gate checks are in `Resources/PHASES.md` § Phase 6.
 - The model is trained (`models/anomaly_model.joblib`, gitignored; retrain with `python -m src.train_model` on a fresh clone).
 - `.streamlit/secrets.toml` is generated (`python scripts/make_secrets.py`, gitignored).
-- MySQL and the topic still hold the Phase 4 live run (7,336 rows, 106 flags, `.producer_state` = 9384). Before any gate
-  run, use `python scripts/reset_demo.py` (stop the processor first).
+- The system is empty and healthy: volumes were recreated in Phase 5 (`docker compose down -v`), the topic exists, the
+  tables exist and are empty, no `.producer_state`, nothing running. Before any gate run, use `python scripts/reset_demo.py`
+  (stop the processor first).
 - Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
@@ -28,7 +30,14 @@ and a Streamlit dashboard redraws itself every 2 seconds.
 - `src/train_model.py`: `load_training_rows()` -> (event_time, temperature) for rows 0-1999, `build_training_rows(temps)` ->
   model rows with the 12 warm-up rows dropped; model constants `N_ESTIMATORS`, `CONTAMINATION`, `RANDOM_STATE`.
   Saves `{"model", "feature_names", "sklearn_version"}` with joblib.
-- `src/processor.py`: `load_model()` (exits with one sentence if the file is missing, the scikit-learn version differs or the
+- `src/checks.py`: `retry(what, attempt, errors, fix, wait_s=0, every_s=3)` (retries only the given connection errors,
+  then `sys.exit` with one sentence: what, reason, fix), `reason(error)`, `connect_mysql(wait_s)`, `require_topic(wait_s)`
+  (KafkaAdminClient with `bootstrap_timeout_ms=5000`, then checks the topic is listed), `START_HINT`.
+- `src/producer.py` calls `checks.require_topic()` before creating its producer (`allow_auto_create_topics=False`).
+- `src/processor.py` main order: `load_model()` -> `checks.connect_mysql(60)` -> `checks.require_topic(60)` -> restore ->
+  consumer (`allow_auto_create_topics=False`) -> signal handlers. A MySQL `OperationalError` on write exits with one
+  sentence (the batch's offsets are not committed, so a restart re-reads it). `STARTUP_WAIT_S = 60`.
+- `src/processor.py` (functions): `load_model()` (exits with one sentence if the file is missing, the scikit-learn version differs or the
   feature names differ), `make_consumer()`, `new_state()` (cold-start state, `warmup_left = 12`), `restore_state()` (also restores
   `anomalies_flagged`, sets `warmup_left = 0`), `process_batch(messages, features, state, model)` (one `predict` + one
   `decision_function` per batch), `main()`.
@@ -37,6 +46,8 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   Query helpers `load_metrics()`, `load_curve(n)`, `load_recent_flags()` all use `ttl=0, show_spinner=False`.
 - `scripts/make_secrets.py`: writes `.streamlit/secrets.toml` (`[connections.mysql]`, dialect mysql, driver pymysql) from config.
 - `scripts/reset_demo.py`: recreate topic, delete group `scoring`, empty tables, remove `.producer_state`. Safe to run twice.
+- `tests/test_checks.py` (4 tests: retry succeeds after failures, gives up with one sentence, `wait_s=0` tries once,
+  unexpected errors are not hidden). Total: 16 tests.
 - `tests/test_features.py` (5 hand-calculated tests), `tests/test_scoring.py` (7 tests: train/serve rows identical, warm-up
   across batches, no warm-up after restore, one call per batch, missing/old model refused; uses a `FakeModel` that records
   its input) + `pytest.ini` (`pythonpath = .`, so plain `pytest` works).
@@ -113,6 +124,23 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   warning; live -> "Live"); the chart's datasets were read back for slider 12/288/1000/2016 and equal the newest N rows.
 - `streamlit run` binds all interfaces (Network URL shown); add `--server.address localhost` to keep it local.
 
+## Robustness decisions made in Phase 5 (keep them)
+- The broker has `auto.create.topics.enable=true` (default). Our producer and consumer pass `allow_auto_create_topics=False`
+  and check the topic at startup, so a missing topic gives one sentence instead of being silently recreated (verified:
+  after the drill only `__consumer_offsets` existed). docker-compose.yml is unchanged.
+- kafka-python 3.0.11: an unreachable broker raises `KafkaTimeoutError: Unable to bootstrap from localhost:9092` from
+  `KafkaAdminClient`/`KafkaConsumer`/`KafkaProducer` after `bootstrap_timeout_ms` (measured 3.0 s at 3000, 5.2 s at 5000).
+  No kafka log noise is printed.
+- PyMySQL: refused connection -> `OperationalError` 2003 immediately; MySQL stopped mid-run -> 2013 "Lost connection".
+  `write_batch` only rolls back if `conn.open` (a dead connection cannot roll back); the processor closes `conn` only if open.
+- Dashboard: pandas 3 wraps errors raised while a query runs in `pandas.errors.DatabaseError` (the SQLAlchemy error is
+  `__cause__`); connection failures before the query arrive as `sqlalchemy.exc.OperationalError` directly. `live_view()`
+  unwraps and shows one `st.error` sentence (MySQL down / tables missing); the fragment keeps its timer and recovers.
+  Missing secrets: `st.connection` raises `StreamlitAPIException` -> `st.error` + `st.stop()`.
+- AppTest: `at.secrets` does NOT reach `st.connection`; it reads `.streamlit/secrets.toml` from the working directory.
+  Run AppTest checks from the repo root (or from an empty folder to simulate missing secrets), with an absolute script path.
+- README is one ordered path (Setup 1-9, then three terminals). Windows lines are given but were not run on Windows.
+
 ## How to run gate checks from Claude Code (lessons from Phase 2)
 - Run long-lived processes with `run_in_background` and `python -u` (unbuffered), so their log lines appear live.
 - Foreground `sleep` is blocked: wait for a condition with a background `until ...; do sleep 1; done` loop that also
@@ -146,7 +174,7 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   - [x] ML algorithm trained and scoring live (Phase 3: IsolationForest trained offline, every batch scored in the processor)
   - [x] Visualization auto-refreshing on a live data source (Phase 4: Streamlit fragment re-queries MySQL every 2 s)
   - [x] Database serving layer between processor and dashboard (Phase 2: processor writes readings + metrics_current)
-  - [ ] Full pipeline runs end to end; dashboard updates on its own
+  - [x] Full pipeline runs end to end; dashboard updates on its own (Phase 5: clean run from the README + full replay)
   - [ ] Written report + live demo or screen recording
 
 ## Deliberate departures from the course guide (say so in the report)
@@ -229,7 +257,10 @@ A flag outside a labelled window is unlabelled, not proven false.
 
 ### Expected numbers (reference checks, never targets to tune towards)
 - Phase 3 (replay from 2013-12-10, 2,200 events): about 8 flags on 2013-12-10 and 49 on 2013-12-16 (temperature collapses to about 2).
-- Phase 5 full replay: 20,683 rows stored, 12 late events dropped.
+- Phase 5 full replay: 20,683 rows stored, 12 late events dropped. Measured: exactly that, plus 284 flagged (the
+  PHASES.md reference is about 284), peak 108.51 at 2013-12-26 15:45, minimum 2.08 at 2013-12-16 17:25, LAG 0 when the
+  producer finished, max pipeline lag 57 ms at --rate 200. A full replay from seq 2000 also flags 9 readings on
+  2013-12-09 21:30-22:10 (a fast rise right after the stream starts; outside the labelled windows).
 - Demo at --rate 10 from 2013-12-10: first flags after about 27 s (event time 10 Dec 22:40), the collapse starts about 2 min 50 s in, and the minimum of 2.1 arrives at about 3 min 14 s.
 
 ## Processor behaviour
@@ -284,6 +315,7 @@ Mini_Project_DSA/
 ├── src/
 │   ├── __init__.py            ✓ makes `python -m src.<module>` work
 │   ├── config.py              ✓ reads .env, one place for every setting
+│   ├── checks.py              ✓ start-up checks: retry, MySQL, Kafka topic (one-sentence failures)
 │   ├── db.py                  ✓ connection, schema init, batch writes, state reads
 │   ├── producer.py            ✓ layer 1: CSV to Kafka, paced
 │   ├── features.py            ✓ RollingFeatures, shared by training and serving
@@ -299,7 +331,8 @@ Mini_Project_DSA/
 ├── models/                    ✓ anomaly_model.joblib (generated by train_model, gitignored)
 ├── tests/
 │   ├── test_features.py       ✓ 5 hand-calculated feature tests
-│   └── test_scoring.py        ✓ 7 tests: train/serve identical rows, warm-up, model loading
+│   ├── test_scoring.py        ✓ 7 tests: train/serve identical rows, warm-up, model loading
+│   └── test_checks.py         ✓ 4 tests: retry loop and one-sentence exit
 └── report/
     ├── screenshots/           ✓ (empty)
     ├── evaluation.csv         (Phase 6) comparison table
@@ -316,7 +349,7 @@ One-time setup (already done on this machine; full commands in README.md "Setup"
 Every run:
 1. docker compose up -d
    (fresh start: `python scripts/reset_demo.py` with the processor stopped; tests: `pytest`)
-2. python -m src.train_model (once)
+2. python -m src.train_model (once) and python scripts/make_secrets.py (once)
 3. python -m src.processor
 4. streamlit run dashboard/app.py
 5. python -m src.producer   (options: --rate N, --start-at "YYYY-MM-DD HH:MM", --limit N, --resume)
@@ -372,7 +405,12 @@ The project is submittable after Phase 5. Phases 6 and 7 lift it above the minim
   in MySQL at event time 10 Dec 22:40 about 27 s in; AppTest: waiting / stale warning / live states, tiles equal
   metrics_current; chart contents for slider 12/288/1000/2016 equal the newest N rows; data re-verified against the
   NAB upstream CSV (same sha256), pandas feature recompute and offline model scoring; 12 tests pass)
-- [ ] Phase 5 End to end
+- [x] Phase 5 End to end (gate passed 2026-10-11: `docker compose down -v`, then README followed literally in a copy of
+  the repo with no .venv/.env/model/secrets: every step printed what the README says, 16 tests pass; full replay at
+  --rate 200 in 103 s: 20,695 sent, 20,683 stored (= distinct offsets), 12 late dropped, 284 flagged, LAG 0; failure
+  drills with no traceback: Kafka down (producer 5 s; processor waits 60 s or recovers), MySQL down (processor waits and
+  recovers, mid-run loss exits cleanly and restart loses nothing; dashboard error then recovery), topic missing (not
+  auto-created), model missing, secrets missing, tables missing)
 - [ ] Phase 6 Evaluation (extra)
 - [ ] Phase 7 Forecaster and hourly window (extra)
 - [ ] Phase 8 Demo

@@ -19,12 +19,16 @@ import warnings
 from datetime import datetime, timezone
 
 import joblib
+import pymysql
 import sklearn
 from kafka import DefaultSerializer, JsonSerializer, KafkaConsumer
 from sklearn.exceptions import InconsistentVersionWarning
 
-from src import config, db
+from src import checks, config, db
 from src.features import FEATURE_NAMES, WINDOW_SIZE, RollingFeatures, model_row
+
+# How long to keep retrying Kafka and MySQL at startup before giving up.
+STARTUP_WAIT_S = 60
 
 # Set by Ctrl+C (SIGINT) or SIGTERM. The loop checks it between batches, so
 # a batch is never cut in half.
@@ -56,6 +60,8 @@ def make_consumer():
         enable_auto_commit=False,
         # A brand-new group starts from the first message on the topic (default is "latest").
         auto_offset_reset="earliest",
+        # main() has already checked that the topic exists; never create it by accident.
+        allow_auto_create_topics=False,
         key_deserializer=DefaultSerializer(),
         value_deserializer=JsonSerializer(),
     )
@@ -188,14 +194,18 @@ def process_batch(messages, features, state, model):
 
 
 def main():
-    signal.signal(signal.SIGINT, request_stop)
-    signal.signal(signal.SIGTERM, request_stop)
-
     model = load_model()   # once, at startup: the stream never retrains
-    conn = db.connect()
+    # Wait up to 60 s for MySQL and Kafka, so the processor can be started
+    # together with `docker compose up`. Each gives up with one clear sentence.
+    conn = checks.connect_mysql(wait_s=STARTUP_WAIT_S)
+    checks.require_topic(wait_s=STARTUP_WAIT_S)
     features = RollingFeatures()
     state = restore_state(conn, features)
     consumer = make_consumer()
+
+    # From here on Ctrl+C only asks the loop to stop after the current batch.
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
     print(f"Consuming {config.KAFKA_TOPIC} as group '{config.CONSUMER_GROUP}'. Ctrl+C to stop.")
 
     batch_number = 0
@@ -239,7 +249,13 @@ def main():
                     metrics[key] = previous.get(key)
 
             # MySQL first, Kafka second: the offsets only move on once the data is safe.
-            db.write_batch(conn, [tuple(r) for r in rows], metrics)
+            try:
+                db.write_batch(conn, [tuple(r) for r in rows], metrics)
+            except pymysql.err.OperationalError as error:
+                # The offsets of this batch are not committed, so a restarted
+                # processor reads the batch again: nothing is lost.
+                sys.exit(f"Lost the connection to MySQL ({checks.reason(error)}). {checks.START_HINT}, "
+                         "then start the processor again; it continues where it stopped.")
             if rows:
                 state["last_offset"] = rows[-1][0]
             consumer.commit()
@@ -255,12 +271,17 @@ def main():
             print(line)
     finally:
         consumer.close()
-        conn.close()
+        if conn.open:
+            conn.close()
         print(
-            f"Processor stopped cleanly: {state['events_processed']} processed, "
+            f"Processor stopped: {state['events_processed']} processed, "
             f"{state['anomalies_flagged']} flagged, {state['late_events_dropped']} late dropped."
         )
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Ctrl+C while still waiting for Kafka or MySQL at startup.
+        sys.exit("Stopped before the processor started.")
