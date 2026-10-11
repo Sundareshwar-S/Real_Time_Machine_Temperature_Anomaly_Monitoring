@@ -15,7 +15,7 @@ IsolationForest, MySQL serves the results, and a dashboard that re-queries every
 ## 1. Before presenting (about 2 minutes)
 Open **four terminals**, each in the project folder with the virtual environment active:
 ```bash
-cd ~/Desktop/Mini_Project_DSA && source .venv/bin/activate
+cd ~/Desktop/Real-Time-Machine-Temperature-Anomaly-Monitoring && source .venv/bin/activate
 ```
 Arrange them: T1 processor, T2 forecaster, T3 producer, T4 proof commands. Put the browser next to them.
 

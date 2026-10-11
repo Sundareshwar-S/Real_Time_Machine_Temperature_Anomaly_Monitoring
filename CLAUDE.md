@@ -7,8 +7,8 @@ processor computes rolling metrics, an IsolationForest flags abnormal readings, 
 and a Streamlit dashboard redraws itself every 2 seconds.
 
 ## Current state (update after every passed gate)
-- **All ten phases are done** (2026-10-11). Phase 9 report material, Phase 8 `07c6575`, Phase 7 `7518ab5`, Phase 6 `e71201a`
-  (+ fix `5d31b3c`), Phase 5 `63398c7`, Phase 4 `2361911`, Phase 3 `d1015aa`, Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
+- **All ten phases are done** (2026-10-11). Phase 9 report material, Phase 8 `47affad`, Phase 7 `0104737`, Phase 6 `037688b`
+  (+ fix `fbd3f93`), Phase 5 `0095687`, Phase 4 `b1d0df1`, Phase 3 `9e63a77`, Phase 2 `00fe7e2`, Phase 1 `bdb9484`, Phase 0 `31dd643`.
 - **What is left is the student's own work:** screenshots into `report/screenshots/` (live dashboard, console consumer,
   consumer groups, MySQL counts), the "What I learned" paragraph and name/course details in `report/report_draft.md`
   (marked TODO), rewriting the draft in their own words, and a screen recording of the demo (DEMO.md).
@@ -16,7 +16,7 @@ and a Streamlit dashboard redraws itself every 2 seconds.
 - `.streamlit/secrets.toml` is generated (`python scripts/make_secrets.py`, gitignored).
 - Nothing is running. MySQL and the topic hold the Phase 9 full replay (20,695 sent, 20,683 stored, 284 flagged, 1,700
   forecasts, both groups at lag 0) that `report/results.md` was collected from. Before a demo, use `python scripts/reset_demo.py`.
-- Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
+- Git repo on branch `main`, remote `origin` on GitHub. Commit messages follow Conventional Commits, see "Git commit scheme" below.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
 
@@ -307,7 +307,7 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - Docker container names are `broker` (Kafka) and `mysql` (fixed by `container_name` in docker-compose.yml).
 - Port clashes: a native Kafka from the labs holds 9092, so stop it first. MySQL uses host port 3307 to avoid a local 3306.
 - Kafka CLI tools are inside the broker at `/opt/kafka/bin/` (kafka-topics.sh, kafka-console-consumer.sh, kafka-consumer-groups.sh).
-- Node/npx are not installed. Context7 and Exa are reached through hosted HTTP MCP endpoints.
+- Node 22 / npm / npx and the GitHub CLI (`gh`) are installed from Ubuntu's repo. Context7 and Exa are reached through hosted HTTP MCP endpoints.
 
 ## Dataset
 - data/machine_temperature_system_failure.csv from
@@ -388,7 +388,7 @@ One file per layer, so each report section can point at exactly one script.
 `✓` = exists now. `(Phase N)` = created in that phase. Empty folders hold a `.gitkeep` until they get real files (then delete it).
 
 ```text
-Mini_Project_DSA/
+Real-Time-Machine-Temperature-Anomaly-Monitoring/
 ├── Resources/                 ✓ course brief and project plan (read-only reference)
 │   ├── Machine Temperature Streaming Analytics Mini-Project Plan.md   design plan + phase prompts
 │   ├── PHASES.md              phase-by-phase guide and gate checks
@@ -475,6 +475,13 @@ The MySQL line reads the credentials from the container's own environment, so no
 Count messages on the topic: `docker exec broker /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic machine-temperature`.
 Right after reset_demo.py (before the processor runs) the consumer-groups line says "Group scoring not found": expected, not a bug.
 Drop `-it` from the console consumer and add `--timeout-ms 5000` when running it non-interactively (e.g. from Claude Code).
+
+## Git commit scheme
+- Format: `type(scope): subject`. Imperative mood, lower case, no full stop, 72 characters at most. The body says why.
+- Types: `feat` (new behaviour), `fix` (bug), `docs` (README, CLAUDE.md, report, DEMO), `test`, `refactor`, `chore` (setup, config, dependencies).
+- Scopes: `producer`, `processor`, `model`, `features`, `db`, `dashboard`, `forecaster`, `evaluation`, `reliability`, `claude`, `report`, `demo`, `setup`.
+- One logical change per commit. A phase may be several commits; name the phase in the body (`Phase 4 gate passed`).
+- Commit only after the phase's gate check has passed, and never commit `.env`, `.streamlit/secrets.toml`, the model file or `.venv`.
 
 ## Phase gates
 0 Setup: both containers healthy, topic exists, tables exist
