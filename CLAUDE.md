@@ -7,9 +7,11 @@ processor computes rolling metrics, an IsolationForest flags abnormal readings, 
 and a Streamlit dashboard redraws itself every 2 seconds.
 
 ## Current state (update after every passed gate)
-- Last passed phase: **Phase 1 Producer** (2026-10-11). Phase 0 Setup is commit `87a0b36`.
+- Last passed phase: **Phase 1 Producer** (commit `145079d`, 2026-10-11). Phase 0 Setup is commit `87a0b36`.
 - **Next step: Phase 2, the processor and database layer.** Its prompt is under "Phase 2 · Processor and database" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 2.
-- The topic currently holds 80 test messages from the Phase 1 gate (seq 2049 appears twice because `--start-at` rewound). Phase 2's `reset_demo.py` clears it.
+- Leftovers from the Phase 1 gate: the topic holds 80 test messages (seq 2049 appears twice because `--start-at` rewound)
+  and `.producer_state` holds 2078, so `--resume` would continue from seq 2079. Phase 2's `reset_demo.py` must clear both
+  (recreate the topic, delete `.producer_state`); until then, run the producer without `--resume` for a fresh start.
 - Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
@@ -43,6 +45,17 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 | (none, design constant) | `STREAM_START_SEQ` (int) | 2000: first stream row; rows before it are training only |
 | (none) | `PRODUCER_STATE` (absolute Path) | .producer_state (gitignored) |
 
+## Library notes learned while building (kafka-python 3.0.11)
+- Serializers live in `kafka`: `DefaultSerializer()` (str <-> UTF-8 bytes) and `JsonSerializer()` (dict <-> JSON bytes).
+  The same classes deserialize, so the Phase 2 consumer can use `key_deserializer=DefaultSerializer()` and
+  `value_deserializer=JsonSerializer()` (confirm the consumer parameter names in Context7 before writing).
+- 3.0 producer defaults: `acks='all'`, `enable_idempotence=True`, `linger_ms=0`. `send()` is asynchronous: call `flush()`
+  before recording progress, as the producer does before writing `.producer_state`.
+- 3.0 removed `NoBrokersAvailable`. An unreachable broker shows up as a timeout (`kafka.errors.KafkaTimeoutError`,
+  after `bootstrap_timeout_ms`, default 30 s). Phase 5's clear-error handling must catch that, not `NoBrokersAvailable`.
+- 3.0 changed the consumer default `session_timeout_ms` to 45 s (relevant when restarting the processor in Phase 2).
+- KafkaProducer, KafkaConsumer and KafkaAdminClient all work as context managers (`with ... as producer:`).
+
 ## Project docs (read these when a detail is missing here)
 - `Resources/Machine Temperature Streaming Analytics Mini-Project Plan.md`: the full design, the evaluation table, and the exact prompt for each phase. This is the source of truth.
 - `Resources/PHASES.md`: for each phase, the goal, what to understand for the viva, the gate commands and the usual failures.
@@ -56,7 +69,7 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - **Key idea:** streaming ingestion does not make a dashboard live. It is live only if new data keeps arriving
   AND the view re-queries on its own. Pausing the producer must freeze the numbers while the page keeps refreshing.
 - Submission checklist:
-  - [ ] Streaming tool (Kafka) working
+  - [x] Streaming tool (Kafka) working (Phase 1: producer -> topic verified with the console consumer)
   - [ ] ML algorithm trained and scoring live
   - [ ] Visualization auto-refreshing on a live data source
   - [ ] Database serving layer between processor and dashboard
