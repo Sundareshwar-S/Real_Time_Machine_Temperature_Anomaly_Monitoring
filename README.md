@@ -86,6 +86,24 @@ docker exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATAB
 python -c "from kafka import KafkaAdminClient; print(KafkaAdminClient(bootstrap_servers='localhost:9092').list_topics())"
 ```
 
+## Run the producer (layer 1)
+Replays the stream rows (seq 2000 onward; rows 0-1999 are kept for training) into Kafka as JSON events.
+```bash
+python -m src.producer                                   # whole stream, 10 events/s
+python -m src.producer --rate 5 --limit 50               # 50 events at 5 per second
+python -m src.producer --start-at "2013-12-10 00:00"     # skip to the first failure window (seq 2049)
+python -m src.producer --resume                          # continue after Ctrl+C
+```
+- `--start-at` and `--resume` cannot be combined.
+- The last sent seq is saved in `.producer_state` every 50 events and on exit (Ctrl+C is safe).
+
+Watch the events arrive in a second terminal:
+```bash
+docker exec -it broker /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic machine-temperature --from-beginning --property print.key=true
+```
+The first event of a fresh run is seq 2000, event_time `2013-12-09 19:55:00`, key `machine-1`.
+
 ## Stop
 ```bash
 docker compose down               # keeps the data

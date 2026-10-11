@@ -7,8 +7,9 @@ processor computes rolling metrics, an IsolationForest flags abnormal readings, 
 and a Streamlit dashboard redraws itself every 2 seconds.
 
 ## Current state (update after every passed gate)
-- Last passed phase: **Phase 0 Setup** (commit `87a0b36`, 2026-10-11).
-- **Next step: Phase 1, the producer.** Its prompt is under "Phase 1 · Producer" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 1.
+- Last passed phase: **Phase 1 Producer** (2026-10-11). Phase 0 Setup is commit `87a0b36`.
+- **Next step: Phase 2, the processor and database layer.** Its prompt is under "Phase 2 · Processor and database" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 2.
+- The topic currently holds 80 test messages from the Phase 1 gate (seq 2049 appears twice because `--start-at` rewound). Phase 2's `reset_demo.py` clears it.
 - Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
@@ -21,6 +22,7 @@ and a Streamlit dashboard redraws itself every 2 seconds.
 - `data/anomaly_windows.json`: `{"source": url, "key": nab_key, "windows": [{"start": ..., "end": ...}, ...]}`,
   4 windows, timestamps formatted like `"2013-12-10 06:25:00.000000"`.
 - Topic `machine-temperature` exists with 1 partition.
+- `src/producer.py`: `load_rows()`, `make_event()`, `read_state()`/`write_state()`, `choose_rows()`; CLI options `--rate`, `--limit`, `--start-at` | `--resume` (mutually exclusive). Fresh run starts at seq 2000 (`2013-12-09 19:55:00`); `--start-at "2013-12-10 00:00"` starts at seq 2049. `temperature` is sent with the CSV's full precision (not rounded).
 
 ## Settings (.env -> src/config.py)
 Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To add a setting, add it to
@@ -38,6 +40,8 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 | ANOMALY_WINDOWS | `ANOMALY_WINDOWS` (absolute Path) | data/anomaly_windows.json |
 | MODEL_PATH | `MODEL_PATH` (absolute Path) | models/anomaly_model.joblib |
 | (none) | `SCHEMA_SQL`, `ROOT` (absolute Paths) | db/schema.sql, repo root |
+| (none, design constant) | `STREAM_START_SEQ` (int) | 2000: first stream row; rows before it are training only |
+| (none) | `PRODUCER_STATE` (absolute Path) | .producer_state (gitignored) |
 
 ## Project docs (read these when a detail is missing here)
 - `Resources/Machine Temperature Streaming Analytics Mini-Project Plan.md`: the full design, the evaluation table, and the exact prompt for each phase. This is the source of truth.
@@ -194,7 +198,7 @@ Mini_Project_DSA/
 │   ├── __init__.py            ✓ makes `python -m src.<module>` work
 │   ├── config.py              ✓ reads .env, one place for every setting
 │   ├── db.py                  ✓ connect() + init_schema() now; batch writes in Phase 2
-│   ├── producer.py            (Phase 1) layer 1: CSV to Kafka, paced
+│   ├── producer.py            ✓ layer 1: CSV to Kafka, paced
 │   ├── features.py            (Phase 2) RollingFeatures, shared by training and serving
 │   ├── processor.py           (Phase 2, ML added in Phase 3) layers 3 and 4: window, score, store
 │   ├── train_model.py         (Phase 3) layer 4, offline: fit and save the model
@@ -238,6 +242,7 @@ docker exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATAB
 ```
 The MySQL line reads the credentials from the container's own environment, so no password is typed
 (its "Using a password on the command line" warning is harmless).
+Count messages on the topic: `docker exec broker /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic machine-temperature`.
 Until the processor first runs (Phase 2), the consumer-groups line fails with "Group scoring not found": expected, not a bug.
 Drop `-it` from the console consumer and add `--timeout-ms 5000` when running it non-interactively (e.g. from Claude Code).
 
@@ -267,7 +272,7 @@ The project is submittable after Phase 5. Phases 6 and 7 lift it above the minim
 
 ## Progress (tick when the gate passes and the phase is committed)
 - [x] Phase 0 Setup (gate passed 2026-10-11: broker + mysql healthy, topic machine-temperature with 1 partition, tables readings + metrics_current, host lists topics via kafka-python)
-- [ ] Phase 1 Producer
+- [x] Phase 1 Producer (gate passed 2026-10-11: 5/s pacing confirmed from Kafka timestamps, --start-at -> seq 2049, --resume continues from saved seq, Ctrl+C saves state, bad-value guard tested, topic count = events sent)
 - [ ] Phase 2 Processor and database
 - [ ] Phase 3 ML model
 - [ ] Phase 4 Dashboard

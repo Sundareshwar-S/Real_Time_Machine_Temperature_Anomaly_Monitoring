@@ -31,3 +31,11 @@ DATA_CSV = ROOT / os.getenv("DATA_CSV", "data/machine_temperature_system_failure
 ANOMALY_WINDOWS = ROOT / os.getenv("ANOMALY_WINDOWS", "data/anomaly_windows.json")
 MODEL_PATH = ROOT / os.getenv("MODEL_PATH", "models/anomaly_model.joblib")
 SCHEMA_SQL = ROOT / "db" / "schema.sql"
+
+# Project constants. These are design decisions, not machine settings, so they
+# are not in .env.
+# Rows 0-1999 train the model offline; rows 2000 onward are the live stream.
+# The producer never sends a row before this, and training never reads one after it.
+STREAM_START_SEQ = 2000
+# The producer saves the last sent seq here so --resume can continue after Ctrl+C.
+PRODUCER_STATE = ROOT / ".producer_state"
