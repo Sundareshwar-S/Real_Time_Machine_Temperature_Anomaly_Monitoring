@@ -7,19 +7,25 @@ processor computes rolling metrics, an IsolationForest flags abnormal readings, 
 and a Streamlit dashboard redraws itself every 2 seconds.
 
 ## Current state (update after every passed gate)
-- Last passed phase: **Phase 1 Producer** (commit `145079d`, 2026-10-11). Phase 0 Setup is commit `87a0b36`.
-- **Next step: Phase 2, the processor and database layer.** Its prompt is under "Phase 2 · Processor and database" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 2.
-- Leftovers from the Phase 1 gate: the topic holds 80 test messages (seq 2049 appears twice because `--start-at` rewound)
-  and `.producer_state` holds 2078, so `--resume` would continue from seq 2079. Phase 2's `reset_demo.py` must clear both
-  (recreate the topic, delete `.producer_state`); until then, run the producer without `--resume` for a fresh start.
+- Last passed phase: **Phase 2 Processor and database** (2026-10-11). Earlier: Phase 1 `145079d`, Phase 0 `87a0b36`.
+- **Next step: Phase 3, the ML model.** Its prompt is under "Phase 3 · ML model (layer 4)" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 3.
+- The system is reset (empty topic, no consumer group, empty tables, no `.producer_state`). Before any gate run, use
+  `python scripts/reset_demo.py` (stop the processor first).
 - Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
 
 ## What already exists (reuse it, do not rewrite it)
 - `src/config.py`: every setting (see Settings below).
-- `src/db.py`: `connect()` returns a PyMySQL connection; `init_schema()` applies db/schema.sql; CLI `python -m src.db --init`.
-  Phase 2 adds the batch-write and state-restore functions to this same file.
+- `src/db.py`: `connect()`, `init_schema()` (CLI `python -m src.db --init`), `READING_COLUMNS` (tuple order of a readings row),
+  `write_batch(conn, readings, metrics)` (one transaction: INSERT IGNORE readings + upsert metrics_current id=1, rollback on error),
+  `fetch_latest_readings(conn, n=12)` (oldest first), `fetch_metrics(conn)` (dict or None), `empty_tables(conn)`.
+- `src/features.py`: `WINDOW_SIZE = 12`, `FEATURE_NAMES = ["temperature", "deviation", "rolling_std", "delta"]` (model column order),
+  `RollingFeatures.update(t)` -> dict with the 4 features + `rolling_avg`; `RollingFeatures.restore(temps)` refills the window (oldest first).
+- `src/processor.py`: `make_consumer()`, `restore_state()`, `process_batch()`, `main()`. Phase 2 stores `anomaly_score` NULL and
+  `is_anomaly` 0; Phase 3 adds the model in `process_batch`/`main` (score the batch's feature rows with one call).
+- `scripts/reset_demo.py`: recreate topic, delete group `scoring`, empty tables, remove `.producer_state`. Safe to run twice.
+- `tests/test_features.py` (5 hand-calculated tests) + `pytest.ini` (`pythonpath = .`, so plain `pytest` works).
 - `db/schema.sql`: `readings` and `metrics_current`, applied and verified.
 - `data/anomaly_windows.json`: `{"source": url, "key": nab_key, "windows": [{"start": ..., "end": ...}, ...]}`,
   4 windows, timestamps formatted like `"2013-12-10 06:25:00.000000"`.
@@ -55,6 +61,20 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   after `bootstrap_timeout_ms`, default 30 s). Phase 5's clear-error handling must catch that, not `NoBrokersAvailable`.
 - 3.0 changed the consumer default `session_timeout_ms` to 45 s (relevant when restarting the processor in Phase 2).
 - KafkaProducer, KafkaConsumer and KafkaAdminClient all work as context managers (`with ... as producer:`).
+- Consumer defaults are `auto_offset_reset='latest'` and `enable_auto_commit=True`; the processor overrides both.
+- Admin: `list_groups()` returns dicts (`g["group_id"]`). `delete_groups([g])` returns a **dict** `{group_id: "OK" or error name}`
+  even though its docstring says "list of tuples" (the stale docstring caused a reset_demo bug; trust the real value).
+- After a `kill -9` of the processor, the restarted one waits up to `session_timeout_ms` (45 s; measured 27 s) for the dead
+  member to expire before it gets the partition. A clean Ctrl+C stop rejoins at once.
+
+## Processor decisions made in Phase 2 (keep them)
+- All wall-clock times (`produced_at`, `stored_at`, `updated_at`) are stored as **naive UTC** in DATETIME(3).
+- `events_processed` = accepted and stored events. Late ones go to `late_events_dropped`, so processed + dropped = consumed.
+- Ctrl+C/SIGTERM only set a flag; the loop finishes the batch (MySQL write, then Kafka commit) and closes.
+- On startup the newest stored `kafka_offset` is restored; messages at or below it are crash replays and are skipped quietly
+  (not re-stored, not counted as late). This assumes topic and tables are reset together, as reset_demo.py does.
+- A batch where every event is late still upserts metrics_current, keeping the last known temperature/rolling_avg/lag.
+- MySQL: `STORED` is a reserved word, so do not use it as a column alias in queries.
 
 ## Project docs (read these when a detail is missing here)
 - `Resources/Machine Temperature Streaming Analytics Mini-Project Plan.md`: the full design, the evaluation table, and the exact prompt for each phase. This is the source of truth.
@@ -72,7 +92,7 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   - [x] Streaming tool (Kafka) working (Phase 1: producer -> topic verified with the console consumer)
   - [ ] ML algorithm trained and scoring live
   - [ ] Visualization auto-refreshing on a live data source
-  - [ ] Database serving layer between processor and dashboard
+  - [x] Database serving layer between processor and dashboard (Phase 2: processor writes readings + metrics_current)
   - [ ] Full pipeline runs end to end; dashboard updates on its own
   - [ ] Written report + live demo or screen recording
 
@@ -197,6 +217,7 @@ Mini_Project_DSA/
 ├── .env                       ✓ local copy of .env.example (gitignored)
 ├── .gitignore                 ✓
 ├── requirements.txt           ✓ pinned versions
+├── pytest.ini                 ✓ lets plain `pytest` import src
 ├── skills-lock.json           ✓ sources of the installed skills (skills.sh)
 ├── .claude/
 │   └── skills/                ✓ project skills (see "Skills available")
@@ -210,20 +231,20 @@ Mini_Project_DSA/
 ├── src/
 │   ├── __init__.py            ✓ makes `python -m src.<module>` work
 │   ├── config.py              ✓ reads .env, one place for every setting
-│   ├── db.py                  ✓ connect() + init_schema() now; batch writes in Phase 2
+│   ├── db.py                  ✓ connection, schema init, batch writes, state reads
 │   ├── producer.py            ✓ layer 1: CSV to Kafka, paced
-│   ├── features.py            (Phase 2) RollingFeatures, shared by training and serving
-│   ├── processor.py           (Phase 2, ML added in Phase 3) layers 3 and 4: window, score, store
+│   ├── features.py            ✓ RollingFeatures, shared by training and serving
+│   ├── processor.py           ✓ layer 3 now (window, store); layer 4 scoring added in Phase 3
 │   ├── train_model.py         (Phase 3) layer 4, offline: fit and save the model
 │   └── forecaster.py          (Phase 7) extra: second consumer, ARIMA forecast
 ├── dashboard/
 │   └── app.py                 (Phase 4) layer 6: Streamlit
 ├── scripts/
-│   ├── reset_demo.py          (Phase 2) recreate topic, empty tables
+│   ├── reset_demo.py          ✓ recreate topic, delete consumer group, empty tables
 │   └── evaluate.py            (Phase 6) extra: score flags against NAB labels
 ├── models/                    anomaly_model.joblib (Phase 3, generated, gitignored)
 ├── tests/
-│   └── test_features.py       (Phase 2)
+│   └── test_features.py       ✓ 5 hand-calculated feature tests
 └── report/
     ├── screenshots/           ✓ (empty)
     ├── evaluation.csv         (Phase 6) comparison table
@@ -256,7 +277,7 @@ docker exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATAB
 The MySQL line reads the credentials from the container's own environment, so no password is typed
 (its "Using a password on the command line" warning is harmless).
 Count messages on the topic: `docker exec broker /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic machine-temperature`.
-Until the processor first runs (Phase 2), the consumer-groups line fails with "Group scoring not found": expected, not a bug.
+Right after reset_demo.py (before the processor runs) the consumer-groups line says "Group scoring not found": expected, not a bug.
 Drop `-it` from the console consumer and add `--timeout-ms 5000` when running it non-interactively (e.g. from Claude Code).
 
 ## Phase gates
@@ -286,7 +307,7 @@ The project is submittable after Phase 5. Phases 6 and 7 lift it above the minim
 ## Progress (tick when the gate passes and the phase is committed)
 - [x] Phase 0 Setup (gate passed 2026-10-11: broker + mysql healthy, topic machine-temperature with 1 partition, tables readings + metrics_current, host lists topics via kafka-python)
 - [x] Phase 1 Producer (gate passed 2026-10-11: 5/s pacing confirmed from Kafka timestamps, --start-at -> seq 2049, --resume continues from saved seq, Ctrl+C saves state, bad-value guard tested, topic count = events sent)
-- [ ] Phase 2 Processor and database
+- [x] Phase 2 Processor and database (gate passed 2026-10-11: 5 tests pass; reset safe twice; count climbs 104 -> 180 in 3 s at 20/s; Ctrl+C restart and kill -9 restart: COUNT = DISTINCT offsets (1000 = 1000), rolling_avg/std match an independent pandas recompute to 1e-12; 12 repeats on 2014-01-07 dropped (seq 10149-10160); lag 0)
 - [ ] Phase 3 ML model
 - [ ] Phase 4 Dashboard
 - [ ] Phase 5 End to end

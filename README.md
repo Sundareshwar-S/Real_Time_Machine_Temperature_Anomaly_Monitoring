@@ -104,6 +104,34 @@ docker exec -it broker /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-serv
 ```
 The first event of a fresh run is seq 2000, event_time `2013-12-09 19:55:00`, key `machine-1`.
 
+## Run the tests
+```bash
+pytest                            # hand-calculated checks of the rolling features
+```
+
+## Reset the demo (empty start)
+Stop the processor first. Then:
+```bash
+python scripts/reset_demo.py      # recreate the topic, delete group "scoring", empty the tables, remove .producer_state
+```
+Safe to run twice in a row.
+
+## Run the processor (layers 3 and 5)
+Start it before (or after) the producer, in its own terminal:
+```bash
+python -m src.processor           # Ctrl+C stops after the current batch
+```
+It reads the topic as consumer group `scoring`, keeps a 1-hour rolling window (12 readings),
+drops repeated or out-of-order timestamps, and writes each batch to MySQL in one transaction
+before committing the Kafka offsets. On restart it picks up where it stopped (window and counters
+are restored from MySQL), so a restart never stores a reading twice.
+
+Watch the data arrive:
+```bash
+docker exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM readings; SELECT * FROM metrics_current\G"'
+docker exec broker /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group scoring
+```
+
 ## Stop
 ```bash
 docker compose down               # keeps the data
