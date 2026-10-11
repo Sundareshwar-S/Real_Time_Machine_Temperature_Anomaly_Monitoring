@@ -7,10 +7,11 @@ processor computes rolling metrics, an IsolationForest flags abnormal readings, 
 and a Streamlit dashboard redraws itself every 2 seconds.
 
 ## Current state (update after every passed gate)
-- Last passed phase: **Phase 3 ML model** (2026-10-11). Earlier: Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
-- **Next step: Phase 4, the dashboard.** Its prompt is under "Phase 4 · Dashboard (layer 6)" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 4.
+- Last passed phase: **Phase 4 Dashboard** (2026-10-11). Earlier: Phase 3 `d1015aa`, Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
+- **Next step: Phase 5, end to end.** Its prompt is under "Phase 5 · End to end" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 5.
 - The model is trained (`models/anomaly_model.joblib`, gitignored; retrain with `python -m src.train_model` on a fresh clone).
-- MySQL and the topic still hold the Phase 3 gate run (2,200 rows, 60 flags, `.producer_state` = 4248). Before any gate
+- `.streamlit/secrets.toml` is generated (`python scripts/make_secrets.py`, gitignored).
+- MySQL and the topic still hold the Phase 4 live run (7,336 rows, 106 flags, `.producer_state` = 9384). Before any gate
   run, use `python scripts/reset_demo.py` (stop the processor first).
 - Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
@@ -31,6 +32,10 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   feature names differ), `make_consumer()`, `new_state()` (cold-start state, `warmup_left = 12`), `restore_state()` (also restores
   `anomalies_flagged`, sets `warmup_left = 0`), `process_batch(messages, features, state, model)` (one `predict` + one
   `decision_function` per batch), `main()`.
+- `dashboard/app.py`: Streamlit page. Sidebar (refresh 1-10 s, curve rows 12-2016 default 288, pause toggle), then one
+  fragment `live_view()` with `run_every=None if paused else refresh_s`: status line, 6 KPI tiles, Altair chart, last 10 flags.
+  Query helpers `load_metrics()`, `load_curve(n)`, `load_recent_flags()` all use `ttl=0, show_spinner=False`.
+- `scripts/make_secrets.py`: writes `.streamlit/secrets.toml` (`[connections.mysql]`, dialect mysql, driver pymysql) from config.
 - `scripts/reset_demo.py`: recreate topic, delete group `scoring`, empty tables, remove `.producer_state`. Safe to run twice.
 - `tests/test_features.py` (5 hand-calculated tests), `tests/test_scoring.py` (7 tests: train/serve rows identical, warm-up
   across batches, no warm-up after restore, one call per batch, missing/old model refused; uses a `FakeModel` that records
@@ -96,6 +101,18 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - Training output (quote it in the report): rows 12-1999 (2013-12-02 22:15 to 2013-12-09 19:50), 1,988 rows, fitted in
   0.19 s, the model flags 20 of its own 1,988 training rows (1.01%).
 
+## Dashboard decisions made in Phase 4 (keep them)
+- `st.connection("mysql", type="sql")` reads `.streamlit/secrets.toml`; the dashboard does not import `src`.
+- Every query passes `ttl=0` (otherwise cached forever) and `show_spinner=False` (otherwise a spinner flashes every refresh).
+- Status age = naive-UTC now minus `metrics_current.updated_at` (stored as naive UTC). Over 10 s -> warning.
+- The pause toggle sets `run_every=None`. Sidebar widgets are outside the fragment, so changing one reruns the whole
+  script (Streamlit docs: "widget outside a fragment -> full script rerun") and the fragment picks up the new value.
+- Chart: `transform_fold` of temperature + rolling_avg into coloured lines, a red point layer from `is_anomaly == 1`,
+  y fixed with `alt.Y(...).scale(domain=[0, 115])`. The page footer shows its own refresh time.
+- Verified headless with `streamlit.testing.v1.AppTest` against the real MySQL (empty -> "Waiting for data"; stale ->
+  warning; live -> "Live"); the chart's datasets were read back for slider 12/288/1000/2016 and equal the newest N rows.
+- `streamlit run` binds all interfaces (Network URL shown); add `--server.address localhost` to keep it local.
+
 ## How to run gate checks from Claude Code (lessons from Phase 2)
 - Run long-lived processes with `run_in_background` and `python -u` (unbuffered), so their log lines appear live.
 - Foreground `sleep` is blocked: wait for a condition with a background `until ...; do sleep 1; done` loop that also
@@ -106,6 +123,11 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   system. In Phase 2 this made the processor skip new messages (new offsets 0-39 were below the stored last offset 999).
 - Prove results independently where possible (e.g. recompute rolling stats with pandas, not RollingFeatures).
   `pd.read_sql` on a PyMySQL connection works but warns; use SQLAlchemy for real code (Phase 4 does).
+- pandas 3.0's default CSV float parser differs from Python `float()` in the last bit for some values (327 of 3,797
+  stream rows, max 1.4e-14). The producer uses `float()`, so stored temperatures equal
+  `pd.read_csv(..., float_precision="round_trip")`. Use that (or the csv module) for exact comparisons (Phase 6).
+- To stop Streamlit, match the process exactly (e.g. `pgrep -f "^.venv/bin/python .venv/bin/streamlit"` or kill the
+  background task); a loose `pkill -f "streamlit run"` pattern also matches the calling shell.
 
 ## Project docs (read these when a detail is missing here)
 - `Resources/Machine Temperature Streaming Analytics Mini-Project Plan.md`: the full design, the evaluation table, and the exact prompt for each phase. This is the source of truth.
@@ -122,7 +144,7 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - Submission checklist:
   - [x] Streaming tool (Kafka) working (Phase 1: producer -> topic verified with the console consumer)
   - [x] ML algorithm trained and scoring live (Phase 3: IsolationForest trained offline, every batch scored in the processor)
-  - [ ] Visualization auto-refreshing on a live data source
+  - [x] Visualization auto-refreshing on a live data source (Phase 4: Streamlit fragment re-queries MySQL every 2 s)
   - [x] Database serving layer between processor and dashboard (Phase 2: processor writes readings + metrics_current)
   - [ ] Full pipeline runs end to end; dashboard updates on its own
   - [ ] Written report + live demo or screen recording
@@ -253,7 +275,7 @@ Mini_Project_DSA/
 ├── .claude/
 │   └── skills/                ✓ project skills (see "Skills available")
 ├── .streamlit/
-│   └── secrets.toml           (Phase 4) generated from .env (gitignored)
+│   └── secrets.toml           ✓ generated from .env by scripts/make_secrets.py (gitignored)
 ├── data/
 │   ├── machine_temperature_system_failure.csv   ✓ identical to the NAB upstream file
 │   └── anomaly_windows.json   ✓ the 4 labelled windows from NAB
@@ -269,9 +291,10 @@ Mini_Project_DSA/
 │   ├── train_model.py         ✓ layer 4, offline: fit and save the model
 │   └── forecaster.py          (Phase 7) extra: second consumer, ARIMA forecast
 ├── dashboard/
-│   └── app.py                 (Phase 4) layer 6: Streamlit
+│   └── app.py                 ✓ layer 6: Streamlit
 ├── scripts/
 │   ├── reset_demo.py          ✓ recreate topic, delete consumer group, empty tables
+│   ├── make_secrets.py        ✓ writes .streamlit/secrets.toml from .env
 │   └── evaluate.py            (Phase 6) extra: score flags against NAB labels
 ├── models/                    ✓ anomaly_model.joblib (generated by train_model, gitignored)
 ├── tests/
@@ -345,7 +368,10 @@ The project is submittable after Phase 5. Phases 6 and 7 lift it above the minim
   2013-12-10, 2,200 events at 50/s: 60 flagged, 8 on 12-10 and 49 on 12-16 (exactly the reference), 1 on 12-15, 2 on 12-17,
   all 60 inside labelled windows, first flag 2013-12-10 22:40; an independent pandas recompute gives identical flags and
   scores; COUNT = DISTINCT = 2,200; lag 0; restart restores "60 flagged"; missing model file -> one sentence, exit 1)
-- [ ] Phase 4 Dashboard
+- [x] Phase 4 Dashboard (gate passed 2026-10-11: user watched the page update live at --rate 10 with no clicks; first flag
+  in MySQL at event time 10 Dec 22:40 about 27 s in; AppTest: waiting / stale warning / live states, tiles equal
+  metrics_current; chart contents for slider 12/288/1000/2016 equal the newest N rows; data re-verified against the
+  NAB upstream CSV (same sha256), pandas feature recompute and offline model scoring; 12 tests pass)
 - [ ] Phase 5 End to end
 - [ ] Phase 6 Evaluation (extra)
 - [ ] Phase 7 Forecaster and hourly window (extra)

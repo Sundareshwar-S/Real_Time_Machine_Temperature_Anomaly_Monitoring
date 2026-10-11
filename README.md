@@ -147,6 +147,26 @@ Flags per day (the Phase 3 check: reset, start the processor, then
 docker exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SELECT DATE(event_time) AS day, COUNT(*) AS flags FROM readings WHERE is_anomaly = 1 GROUP BY day ORDER BY day"'
 ```
 
+## Run the dashboard (layer 6)
+Once, and again after any change to the `MYSQL_*` values in `.env`:
+```bash
+python scripts/make_secrets.py    # writes .streamlit/secrets.toml (gitignored) from .env
+```
+Then, in its own terminal:
+```bash
+streamlit run dashboard/app.py    # open http://localhost:8501
+```
+- Before any data arrives the page says "Waiting for data".
+- While the producer runs, the curve extends and the tiles change with no clicks. The live part
+  of the page is a fragment that re-queries MySQL every 2 s (sidebar: 1 to 10 s, or pause).
+- Started with `--start-at "2013-12-10 00:00" --rate 10`, the first red points (flagged readings)
+  appear after about 27 s.
+- Stop the producer and the status line turns into "No new data for N s. The dashboard is still
+  refreshing." The page keeps refreshing; only the data stopped. `--resume` continues the curve.
+
+If the page looks frozen, check in this order: is the producer running, is the processor's batch
+log moving, and does every query in `dashboard/app.py` pass `ttl=0`.
+
 ## Stop
 ```bash
 docker compose down               # keeps the data
