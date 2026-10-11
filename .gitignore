@@ -1,0 +1,15 @@
+# Virtual environment and local settings
+.venv/
+.env
+.streamlit/secrets.toml
+
+# Producer resume state
+.producer_state
+
+# Generated model files
+models/*.joblib
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/

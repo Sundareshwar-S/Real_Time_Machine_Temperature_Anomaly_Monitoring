@@ -1,0 +1,25 @@
+# Pinned versions. Every package here ships a wheel for Python 3.12-3.14 (checked on PyPI, 2026-10-11).
+
+# Layer 2: streaming client (producer and consumers)
+kafka-python==3.0.11
+
+# Layer 4: ML model (IsolationForest) and the ARIMA extra
+scikit-learn==1.9.1
+statsmodels==0.15.0
+joblib==1.6.0
+
+# Data handling
+pandas==3.0.6
+numpy==2.5.4
+
+# Layer 5: MySQL access (PyMySQL driver, SQLAlchemy for Streamlit's connection)
+PyMySQL==1.2.3
+SQLAlchemy==2.1.4
+
+# Layer 6: dashboard
+streamlit==1.65.0
+altair==6.3.0
+
+# Settings and tests
+python-dotenv==1.2.4
+pytest==9.1.1

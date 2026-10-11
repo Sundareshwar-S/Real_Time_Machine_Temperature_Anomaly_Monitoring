@@ -1,0 +1,22 @@
+{
+  "source": "https://raw.githubusercontent.com/numenta/NAB/master/labels/combined_windows.json",
+  "key": "realKnownCause/machine_temperature_system_failure.csv",
+  "windows": [
+    {
+      "start": "2013-12-10 06:25:00.000000",
+      "end": "2013-12-12 05:35:00.000000"
+    },
+    {
+      "start": "2013-12-15 17:50:00.000000",
+      "end": "2013-12-17 17:00:00.000000"
+    },
+    {
+      "start": "2014-01-27 14:20:00.000000",
+      "end": "2014-01-29 13:30:00.000000"
+    },
+    {
+      "start": "2014-02-07 14:55:00.000000",
+      "end": "2014-02-09 14:05:00.000000"
+    }
+  ]
+}
