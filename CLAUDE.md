@@ -6,6 +6,39 @@ A predictive-maintenance monitor for one industrial machine: readings are replay
 processor computes rolling metrics, an IsolationForest flags abnormal readings, MySQL stores the results,
 and a Streamlit dashboard redraws itself every 2 seconds.
 
+## Current state (update after every passed gate)
+- Last passed phase: **Phase 0 Setup** (commit `87a0b36`, 2026-10-11).
+- **Next step: Phase 1, the producer.** Its prompt is under "Phase 1 · Producer" in the plan file; gate checks and pitfalls are in `Resources/PHASES.md` § Phase 1.
+- Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
+- Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
+  `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
+
+## What already exists (reuse it, do not rewrite it)
+- `src/config.py`: every setting (see Settings below).
+- `src/db.py`: `connect()` returns a PyMySQL connection; `init_schema()` applies db/schema.sql; CLI `python -m src.db --init`.
+  Phase 2 adds the batch-write and state-restore functions to this same file.
+- `db/schema.sql`: `readings` and `metrics_current`, applied and verified.
+- `data/anomaly_windows.json`: `{"source": url, "key": nab_key, "windows": [{"start": ..., "end": ...}, ...]}`,
+  4 windows, timestamps formatted like `"2013-12-10 06:25:00.000000"`.
+- Topic `machine-temperature` exists with 1 partition.
+
+## Settings (.env -> src/config.py)
+Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To add a setting, add it to
+`.env.example`, `.env` and `config.py` together.
+| .env key | config.py name | Value now |
+| --- | --- | --- |
+| KAFKA_BOOTSTRAP_SERVERS | `KAFKA_BOOTSTRAP_SERVERS` (str) | localhost:9092 |
+| KAFKA_TOPIC | `KAFKA_TOPIC` (str) | machine-temperature |
+| SENSOR_ID | `SENSOR_ID` (str) | machine-1 |
+| CONSUMER_GROUP | `CONSUMER_GROUP` (str) | scoring |
+| MYSQL_HOST / MYSQL_PORT | `MYSQL_HOST` (str) / `MYSQL_PORT` (int) | 127.0.0.1 / 3307 |
+| MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD | same names (str) | machine_monitor / monitor / (in .env) |
+| MYSQL_ROOT_PASSWORD | not exposed (used only by docker-compose.yml) | (in .env) |
+| DATA_CSV | `DATA_CSV` (absolute Path) | data/machine_temperature_system_failure.csv |
+| ANOMALY_WINDOWS | `ANOMALY_WINDOWS` (absolute Path) | data/anomaly_windows.json |
+| MODEL_PATH | `MODEL_PATH` (absolute Path) | models/anomaly_model.joblib |
+| (none) | `SCHEMA_SQL`, `ROOT` (absolute Paths) | db/schema.sql, repo root |
+
 ## Project docs (read these when a detail is missing here)
 - `Resources/Machine Temperature Streaming Analytics Mini-Project Plan.md`: the full design, the evaluation table, and the exact prompt for each phase. This is the source of truth.
 - `Resources/PHASES.md`: for each phase, the goal, what to understand for the viva, the gate commands and the usual failures.
@@ -54,7 +87,7 @@ and a Streamlit dashboard redraws itself every 2 seconds.
 - `.env` holds local demo credentials (app user `monitor`); docker-compose.yml reads the MYSQL_* values from it. PyMySQL authenticates to MySQL 8.4 without the `cryptography` package.
 - db/schema.sql is split on semicolons by `src/db.py`, so never put a semicolon inside a SQL comment.
 - `sudo` cannot prompt inside Claude Code; use `pkexec <command>` (graphical password dialog) for system installs.
-- Docker container names are expected to be `broker` (Kafka) and `mysql`. Use `docker compose ps` if they differ.
+- Docker container names are `broker` (Kafka) and `mysql` (fixed by `container_name` in docker-compose.yml).
 - Port clashes: a native Kafka from the labs holds 9092, so stop it first. MySQL uses host port 3307 to avoid a local 3306.
 - Kafka CLI tools are inside the broker at `/opt/kafka/bin/` (kafka-topics.sh, kafka-console-consumer.sh, kafka-consumer-groups.sh).
 - Node/npx are not installed. Context7 and Exa are reached through hosted HTTP MCP endpoints.
@@ -130,63 +163,83 @@ A flag outside a labelled window is unlabelled, not proven false.
 
 ## Repository layout
 One file per layer, so each report section can point at exactly one script.
+`✓` = exists now. `(Phase N)` = created in that phase. Empty folders hold a `.gitkeep` until they get real files (then delete it).
 
 ```text
 Mini_Project_DSA/
-├── Resources/                 course brief and project plan (read-only reference)
+├── Resources/                 ✓ course brief and project plan (read-only reference)
 │   ├── Machine Temperature Streaming Analytics Mini-Project Plan.md   design plan + phase prompts
 │   ├── PHASES.md              phase-by-phase guide and gate checks
 │   ├── MiniProject_Guide.pdf  course brief
 │   └── MINI_project_components_table.pdf   allowed tools per layer
-├── CLAUDE.md                  project rules Claude Code reads every session
-├── README.md                  setup and run order
-├── DEMO.md                    Phase 8: live demo runbook
-├── docker-compose.yml         Kafka broker + MySQL
-├── .env.example               ports, topic name, DB credentials
-├── .env                       local copy of .env.example (gitignored)
-├── .gitignore
-├── requirements.txt           pinned versions
-├── skills-lock.json           sources of the installed skills (skills.sh)
+├── CLAUDE.md                  ✓ project rules Claude Code reads every session
+├── README.md                  ✓ setup and run order (grows every phase)
+├── DEMO.md                    (Phase 8) live demo runbook
+├── docker-compose.yml         ✓ Kafka broker + MySQL
+├── .env.example               ✓ ports, topic name, DB credentials
+├── .env                       ✓ local copy of .env.example (gitignored)
+├── .gitignore                 ✓
+├── requirements.txt           ✓ pinned versions
+├── skills-lock.json           ✓ sources of the installed skills (skills.sh)
 ├── .claude/
-│   └── skills/                project skills (superpowers: TDD, debugging, verification, plans)
+│   └── skills/                ✓ project skills (see "Skills available")
 ├── .streamlit/
-│   └── secrets.toml           generated from .env (gitignored)
+│   └── secrets.toml           (Phase 4) generated from .env (gitignored)
 ├── data/
-│   ├── machine_temperature_system_failure.csv
-│   └── anomaly_windows.json   the 4 labelled windows from NAB
+│   ├── machine_temperature_system_failure.csv   ✓ identical to the NAB upstream file
+│   └── anomaly_windows.json   ✓ the 4 labelled windows from NAB
 ├── db/
-│   └── schema.sql             all tables
+│   └── schema.sql             ✓ readings + metrics_current (Phase 7 adds 2 tables)
 ├── src/
-│   ├── config.py              reads .env, one place for every setting
-│   ├── features.py            RollingFeatures, shared by training and serving
-│   ├── db.py                  MySQL connection and batch writes
-│   ├── producer.py            layer 1: CSV to Kafka, paced
-│   ├── train_model.py         layer 4, offline: fit and save the model
-│   ├── processor.py           layers 3 and 4, live: window, score, store
-│   └── forecaster.py          extra: second consumer, ARIMA forecast
+│   ├── __init__.py            ✓ makes `python -m src.<module>` work
+│   ├── config.py              ✓ reads .env, one place for every setting
+│   ├── db.py                  ✓ connect() + init_schema() now; batch writes in Phase 2
+│   ├── producer.py            (Phase 1) layer 1: CSV to Kafka, paced
+│   ├── features.py            (Phase 2) RollingFeatures, shared by training and serving
+│   ├── processor.py           (Phase 2, ML added in Phase 3) layers 3 and 4: window, score, store
+│   ├── train_model.py         (Phase 3) layer 4, offline: fit and save the model
+│   └── forecaster.py          (Phase 7) extra: second consumer, ARIMA forecast
 ├── dashboard/
-│   └── app.py                 layer 6: Streamlit
+│   └── app.py                 (Phase 4) layer 6: Streamlit
 ├── scripts/
-│   ├── reset_demo.py          recreate topic, empty tables
-│   └── evaluate.py            extra: score flags against NAB labels
-├── models/                    anomaly_model.joblib (generated)
+│   ├── reset_demo.py          (Phase 2) recreate topic, empty tables
+│   └── evaluate.py            (Phase 6) extra: score flags against NAB labels
+├── models/                    anomaly_model.joblib (Phase 3, generated, gitignored)
 ├── tests/
-│   └── test_features.py
+│   └── test_features.py       (Phase 2)
 └── report/
-    ├── screenshots/
-    ├── evaluation.csv         Phase 6 comparison table
-    ├── results.md             Phase 9 real numbers
-    └── report_draft.md        Phase 9 report draft
+    ├── screenshots/           ✓ (empty)
+    ├── evaluation.csv         (Phase 6) comparison table
+    ├── results.md             (Phase 9) real numbers
+    └── report_draft.md        (Phase 9) report draft
 ```
-.gitignore: .venv, .env, .producer_state, models/*.joblib, __pycache__, .streamlit/secrets.toml
+.gitignore: .venv, .env, .producer_state, models/*.joblib, __pycache__, *.pyc, .pytest_cache, .streamlit/secrets.toml
 
 ## Run order
+One-time setup (already done on this machine; full commands in README.md "Setup"):
+`cp .env.example .env` -> `docker compose up -d --wait` -> create the topic with
+`kafka-topics.sh --create --if-not-exists --topic machine-temperature --partitions 1 --replication-factor 1` -> `python -m src.db --init`.
+
+Every run:
 1. docker compose up -d
 2. python -m src.train_model (once)
 3. python -m src.processor
 4. streamlit run dashboard/app.py
 5. python -m src.producer   (options: --rate N, --start-at "YYYY-MM-DD HH:MM", --limit N, --resume)
 Phase 7 adds `python -m src.forecaster` (consumer group "forecast") alongside the processor.
+
+## Handy commands (for checking work, all tested)
+```bash
+docker compose ps                                                     # both (healthy)?
+docker exec broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic machine-temperature
+docker exec -it broker /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic machine-temperature --from-beginning
+docker exec broker /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group scoring
+docker exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM readings;"'
+```
+The MySQL line reads the credentials from the container's own environment, so no password is typed
+(its "Using a password on the command line" warning is harmless).
+Until the processor first runs (Phase 2), the consumer-groups line fails with "Group scoring not found": expected, not a bug.
+Drop `-it` from the console consumer and add `--timeout-ms 5000` when running it non-interactively (e.g. from Claude Code).
 
 ## Phase gates
 0 Setup: both containers healthy, topic exists, tables exist
