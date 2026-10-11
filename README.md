@@ -92,7 +92,7 @@ Run it again after any change to the `MYSQL_*` values in `.env`.
 
 ### 9. Run the tests
 ```bash
-pytest                            # expect: 16 passed
+pytest                            # expect: 21 passed
 ```
 
 ## Run the pipeline
@@ -130,6 +130,30 @@ python -m src.producer --resume                          # continue after Ctrl+C
   transaction before committing the Kafka offsets. A restart never stores a reading twice.
 - **Dashboard** (layer 6): one Streamlit fragment re-queries MySQL every 2 s (sidebar: 1 to 10 s, or
   pause). Every query uses `ttl=0`, so nothing is served from a cache.
+
+## Evaluate the model against the labelled failures
+Offline (no Kafka or MySQL needed): replays the stream rows in memory exactly as the pipeline does and
+compares several detectors against NAB's four labelled failure windows.
+```bash
+python scripts/evaluate.py        # about 5 s
+```
+It prints a Markdown table and writes `report/evaluation.csv`, `report/stream_flags.png` (the whole stream,
+windows shaded, flags in red) and `report/flags_outside_windows.png`. The run checks itself: the
+"4 features, 0.01" row must equal the pipeline's saved model (284 flags on a full replay).
+
+| Detector | Stream flagged | Windows hit | Flags outside windows |
+| --- | --- | --- | --- |
+| IsolationForest, 4 features, 0.005 | 0.93% | 4 of 4 | 125 |
+| **IsolationForest, 4 features, 0.01 (the pipeline)** | 1.37% | 4 of 4 | 201 |
+| IsolationForest, 4 features, 0.02 | 2.64% | 4 of 4 | 406 |
+| IsolationForest, 4 features, 0.05 | 6.31% | 4 of 4 | 893 |
+| IsolationForest, raw temperature, 0.01 (the course guide's approach) | 36.46% | 4 of 4 | 6,282 |
+| Rolling z-score over 288 readings, cut-off 3 (no ML) | 4.65% | 4 of 4 | 843 |
+| Rolling z-score over 288 readings, cut-off 4 (no ML) | 1.47% | 2 of 4 | 241 |
+
+A flag outside a labelled window is unlabelled, not proven false. The dashboard's sidebar toggle
+"Show known failure windows" shades the same windows behind the live curve, and a line under the tiles
+counts how many windows reached so far got at least one flag.
 
 ## How to verify
 Consumer lag of the processor (`LAG` 0 means it has processed everything on the topic):

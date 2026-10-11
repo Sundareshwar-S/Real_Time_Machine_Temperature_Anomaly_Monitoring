@@ -7,14 +7,14 @@ processor computes rolling metrics, an IsolationForest flags abnormal readings, 
 and a Streamlit dashboard redraws itself every 2 seconds.
 
 ## Current state (update after every passed gate)
-- Last passed phase: **Phase 5 End to end** (2026-10-11). Earlier: Phase 4 `2361911`, Phase 3 `d1015aa`, Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
-- **The project is submittable** (every technical checklist item is met). **Next step: Phase 6, evaluation (extra).**
-  Its prompt is under "Phase 6 · Evaluation (extra)" in the plan file; gate checks are in `Resources/PHASES.md` § Phase 6.
+- Last passed phase: **Phase 6 Evaluation** (2026-10-11). Earlier: Phase 5 `63398c7`, Phase 4 `2361911`, Phase 3 `d1015aa`, Phase 2 `a0f8d98`, Phase 1 `145079d`, Phase 0 `87a0b36`.
+- **The project is submittable** (every technical checklist item is met). **Next step: Phase 7, forecaster and hourly
+  window (extra).** Its prompt is under "Phase 7 · Forecaster and hourly window (extra)" in the plan file; gate checks are
+  in `Resources/PHASES.md` § Phase 7. Contamination stays 0.01 unless the user decides otherwise after reading Phase 6.
 - The model is trained (`models/anomaly_model.joblib`, gitignored; retrain with `python -m src.train_model` on a fresh clone).
 - `.streamlit/secrets.toml` is generated (`python scripts/make_secrets.py`, gitignored).
-- The system is empty and healthy: volumes were recreated in Phase 5 (`docker compose down -v`), the topic exists, the
-  tables exist and are empty, no `.producer_state`, nothing running. Before any gate run, use `python scripts/reset_demo.py`
-  (stop the processor first).
+- After Phase 6, MySQL and the topic hold a 2,200-event replay from 2013-12-10 (left for the user's visual check of the
+  window shading). Before any gate run, use `python scripts/reset_demo.py` (stop the processor first).
 - Git repo on branch `main`. After each passed gate, commit with the message `Phase N: <name>`.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
@@ -41,13 +41,22 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   feature names differ), `make_consumer()`, `new_state()` (cold-start state, `warmup_left = 12`), `restore_state()` (also restores
   `anomalies_flagged`, sets `warmup_left = 0`), `process_batch(messages, features, state, model)` (one `predict` + one
   `decision_function` per batch), `main()`.
+- `scripts/evaluate.py`: `load_stream()` (csv + float(), like the producer), `load_windows()`, `accept_in_order()` (the
+  processor's drop rule), `stream_model_rows()`, `isolation_forest_flags(train, stream, c)`, `without_warm_up()`,
+  `zscore_flags(temps, cutoff, history=288)`, `score_against_windows(times, flags, windows)`, `markdown_table()`,
+  `save_figures()`. Writes report/evaluation.csv, report/stream_flags.png, report/flags_outside_windows.png.
+- `dashboard/app.py` (Phase 6 additions): imports `src.config` via one `sys.path.insert` (for `ANOMALY_WINDOWS`),
+  `load_windows()` (`@st.cache_data`), sidebar toggle "Show known failure windows" (default on), shading = `mark_rect`
+  layer of the windows overlapping the curve, clipped to its range; `show_window_progress()` prints
+  "Labelled failure windows with at least one flag: X of Y reached so far" (Y = windows with start <= last_event_time).
 - `dashboard/app.py`: Streamlit page. Sidebar (refresh 1-10 s, curve rows 12-2016 default 288, pause toggle), then one
   fragment `live_view()` with `run_every=None if paused else refresh_s`: status line, 6 KPI tiles, Altair chart, last 10 flags.
   Query helpers `load_metrics()`, `load_curve(n)`, `load_recent_flags()` all use `ttl=0, show_spinner=False`.
 - `scripts/make_secrets.py`: writes `.streamlit/secrets.toml` (`[connections.mysql]`, dialect mysql, driver pymysql) from config.
 - `scripts/reset_demo.py`: recreate topic, delete group `scoring`, empty tables, remove `.producer_state`. Safe to run twice.
 - `tests/test_checks.py` (4 tests: retry succeeds after failures, gives up with one sentence, `wait_s=0` tries once,
-  unexpected errors are not hidden). Total: 16 tests.
+  unexpected errors are not hidden). `tests/test_evaluate.py` (5 hand-calculated tests: inside/outside/delay scoring,
+  drop rule, z-score flag / no flag / flat history). Total: 21 tests.
 - `tests/test_features.py` (5 hand-calculated tests), `tests/test_scoring.py` (7 tests: train/serve rows identical, warm-up
   across batches, no warm-up after restore, one call per batch, missing/old model refused; uses a `FakeModel` that records
   its input) + `pytest.ini` (`pythonpath = .`, so plain `pytest` works).
@@ -141,6 +150,35 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   Run AppTest checks from the repo root (or from an empty folder to simulate missing secrets), with an absolute script path.
 - README is one ordered path (Setup 1-9, then three terminals). Windows lines are given but were not run on Windows.
 
+## Evaluation results and decisions from Phase 6 (the user decides on contamination; nothing was tuned)
+- Method: stream rows 2000+, 12 repeated timestamps dropped (20,683 scored), RollingFeatures from a cold start, first 12
+  never flagged; every IsolationForest uses n_estimators=200, random_state=42 and training rows 12-1999 (raw-temperature
+  model: the same rows' temperatures). z-score: previous 288 accepted readings, sample std, |z| > cut-off, first 288 not
+  scored, std 0 never flags. A flag is inside a window when start <= t <= end. Delay = minutes from window start to the
+  first flag inside it.
+- Self-check: "IF 4 features c=0.01" equals the saved pipeline model on the same rows (284 flags = the Phase 5 replay).
+
+| Detector | Flagged | Windows | Flags | Inside | Outside | Delay w1/w2/w3/w4 (min) |
+| --- | --- | --- | --- | --- | --- | --- |
+| IF 4 features c=0.005 | 0.93% | 4 of 4 | 192 | 67 | 125 | 975 / 1325 / 1760 / 2700 |
+| **IF 4 features c=0.01** | 1.37% | 4 of 4 | 284 | 83 | 201 | 975 / 165 / 210 / 2695 |
+| IF 4 features c=0.02 | 2.64% | 4 of 4 | 547 | 141 | 406 | 960 / 135 / 205 / 2695 |
+| IF 4 features c=0.05 | 6.31% | 4 of 4 | 1305 | 412 | 893 | 0 / 135 / 200 / 0 |
+| IF raw temperature c=0.01 | 36.46% | 4 of 4 | 7541 | 1259 | 6282 | 0 / 0 / 1365 / 25 |
+| z-score 288 cut-off 3 | 4.65% | 4 of 4 | 961 | 118 | 843 | 1035 / 100 / 0 / 2700 |
+| z-score 288 cut-off 4 | 1.47% | 2 of 4 | 304 | 63 | 241 | - / 100 / - / 2700 |
+  Every reference number from the plan is reproduced (0.9/125, 1.4/201, 2.6/406, 36.5%/6,282, 4.6/843, 1.5% 2 of 4 241).
+- Finding for the report: the features describe sudden change, so slow drifts are caught late. Window 4 (the
+  catastrophic failure, a slow decline from 7 Feb) is first flagged 2,695 min (about 45 h) after it opens, at the fast
+  recovery jump near its end; window 1 is first flagged at 10 Dec 22:40 (975 min in), on the fast rise. Only c=0.05
+  catches windows 1 and 4 at their start, at the price of 893 flags outside windows.
+- Figures are written with Altair + vl-convert-python (added to requirements.txt with the user's approval; Altair
+  needs it to save PNG). `alt.data_transformers.disable_max_rows()` is needed for the 20,683-point series.
+- Dashboard check (AppTest, real MySQL): after the 2,200-event replay from 2013-12-10 the line says "2 of 2" and the
+  curve has a rect layer for Window 2 clipped to the shown range; toggle off removes it. After the rest of the stream
+  (--resume): "4 of 4", and no rect in the last 288 readings (no window there). Starting at 2013-12-10 instead of seq 2000
+  gives 275 flags, not 284, because the cold-start warm-up then falls on different readings.
+
 ## How to run gate checks from Claude Code (lessons from Phase 2)
 - Run long-lived processes with `run_in_background` and `python -u` (unbuffered), so their log lines appear live.
 - Foreground `sleep` is blocked: wait for a condition with a background `until ...; do sleep 1; done` loop that also
@@ -198,6 +236,7 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - Kafka: Docker image apache/kafka:4.3.1, KRaft mode, no ZooKeeper, localhost:9092
 - MySQL: Docker image mysql:8.4, host port 3307, database machine_monitor
 - kafka-python 3.0.11, scikit-learn 1.9.1, pandas 3.0.x, numpy 2.x, joblib, PyMySQL 1.2.x, SQLAlchemy 2.1.x, streamlit 1.65.0, altair, statsmodels 0.15.0, python-dotenv, pytest
+- vl-convert-python 1.9.0.post1 (added in Phase 6 with the user's approval: Altair's PNG exporter for report figures)
 
 ## Environment notes (this machine)
 - Ubuntu 26.04, system Python 3.14.4. `.venv` is built on it (python3.14-venv installed) and all pins in requirements.txt are installed and verified (`pip check` clean, IsolationForest and ARIMA smoke-tested) as of 2026-10-11. Use `.venv/bin/python` or activate the venv.
@@ -327,15 +366,18 @@ Mini_Project_DSA/
 ├── scripts/
 │   ├── reset_demo.py          ✓ recreate topic, delete consumer group, empty tables
 │   ├── make_secrets.py        ✓ writes .streamlit/secrets.toml from .env
-│   └── evaluate.py            (Phase 6) extra: score flags against NAB labels
+│   └── evaluate.py            ✓ extra: score flags against NAB labels, write the table and figures
 ├── models/                    ✓ anomaly_model.joblib (generated by train_model, gitignored)
 ├── tests/
 │   ├── test_features.py       ✓ 5 hand-calculated feature tests
 │   ├── test_scoring.py        ✓ 7 tests: train/serve identical rows, warm-up, model loading
-│   └── test_checks.py         ✓ 4 tests: retry loop and one-sentence exit
+│   ├── test_checks.py         ✓ 4 tests: retry loop and one-sentence exit
+│   └── test_evaluate.py       ✓ 5 tests: window scoring, drop rule, z-score baseline
 └── report/
     ├── screenshots/           ✓ (empty)
-    ├── evaluation.csv         (Phase 6) comparison table
+    ├── evaluation.csv         ✓ comparison table (scripts/evaluate.py)
+    ├── stream_flags.png       ✓ whole stream, windows shaded, flags in red
+    ├── flags_outside_windows.png  ✓ bar chart per detector
     ├── results.md             (Phase 9) real numbers
     └── report_draft.md        (Phase 9) report draft
 ```
@@ -411,7 +453,9 @@ The project is submittable after Phase 5. Phases 6 and 7 lift it above the minim
   drills with no traceback: Kafka down (producer 5 s; processor waits 60 s or recovers), MySQL down (processor waits and
   recovers, mid-run loss exits cleanly and restart loses nothing; dashboard error then recovery), topic missing (not
   auto-created), model missing, secrets missing, tables missing)
-- [ ] Phase 6 Evaluation (extra)
+- [x] Phase 6 Evaluation (gate passed 2026-10-11: 21 tests pass; evaluate.py reproduces every reference number (4 features
+  0.01: 1.37%, 4 of 4, 201 outside; raw 36.46%, 6,282 outside) and its 0.01 row equals the saved model (284); both figures
+  written and checked; dashboard shading + toggle + "2 of 2" / "4 of 4" line verified with AppTest on real data)
 - [ ] Phase 7 Forecaster and hourly window (extra)
 - [ ] Phase 8 Demo
 - [ ] Phase 9 Report

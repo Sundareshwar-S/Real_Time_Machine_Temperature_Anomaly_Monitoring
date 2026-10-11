@@ -10,13 +10,21 @@ Stop the producer and the numbers freeze while the page keeps refreshing.
     python scripts/make_secrets.py      (once: database settings from .env)
     streamlit run dashboard/app.py
 """
+import json
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from streamlit.errors import StreamlitAPIException
+
+# `streamlit run dashboard/app.py` only puts dashboard/ on the import path; add
+# the repo root so the page can read its file settings from src/config.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src import config  # noqa: E402
 
 STALE_AFTER_S = 10      # older than this, the status line warns that no new data arrives
 Y_DOMAIN = [0, 115]     # fixed temperature axis, so the chart does not jump between refreshes
@@ -31,6 +39,8 @@ with st.sidebar:
     curve_rows = st.slider("Readings on the curve", min_value=12, max_value=2016, value=288, step=12,
                            help="288 readings = 24 hours of event time (one every 5 minutes).")
     paused = st.toggle("Pause refresh", help="Stops the timed refresh. The data keeps arriving in MySQL.")
+    show_windows = st.toggle("Show known failure windows", value=True,
+                             help="Shade NAB's four labelled failure windows behind the curve.")
 
 # Database settings come from .streamlit/secrets.toml ([connections.mysql]).
 try:
@@ -39,6 +49,17 @@ except StreamlitAPIException:
     st.error("Database settings not found in .streamlit/secrets.toml. "
              "Create the file with: python scripts/make_secrets.py, then reload this page.")
     st.stop()
+
+
+@st.cache_data
+def load_windows():
+    """NAB's labelled failure windows. A static file, so it is read once and cached."""
+    windows = json.loads(config.ANOMALY_WINDOWS.read_text())["windows"]
+    return pd.DataFrame({
+        "window": [f"Window {i}" for i in range(1, len(windows) + 1)],
+        "start": pd.to_datetime([w["start"] for w in windows]),
+        "end": pd.to_datetime([w["end"] for w in windows]),
+    })
 
 
 def load_metrics():
@@ -64,6 +85,20 @@ def load_recent_flags():
         "WHERE is_anomaly = 1 ORDER BY id DESC LIMIT :n",
         params={"n": RECENT_FLAGS}, ttl=0, show_spinner=False,
     )
+
+
+def load_flag_times():
+    # Every flagged event_time: a few hundred rows at most, even after a full replay.
+    return conn.query("SELECT event_time FROM readings WHERE is_anomaly = 1", ttl=0, show_spinner=False)
+
+
+def show_window_progress(last_event_time):
+    """How many labelled windows the stream has reached, and how many of those got a flag."""
+    windows = load_windows()
+    reached = windows[windows["start"] <= last_event_time]
+    flag_times = load_flag_times()["event_time"]
+    caught = sum(((flag_times >= w.start) & (flag_times <= w.end)).any() for w in reached.itertuples())
+    st.markdown(f"Labelled failure windows with at least one flag: **{caught} of {len(reached)}** reached so far")
 
 
 def show_status(updated_at):
@@ -108,8 +143,21 @@ def show_curve(df):
         y=alt.Y("temperature:Q").scale(domain=Y_DOMAIN),
         tooltip=["event_time:T", alt.Tooltip("temperature:Q", format=".1f")],
     )
-    st.altair_chart(alt.layer(lines, flags), alt="Temperature and 1-hour rolling average by event time, "
-                    "with red points on readings flagged as anomalous")
+    layers = [lines, flags]
+    if show_windows:
+        # Only the windows that overlap the curve, clipped to its time range, so
+        # the shading never stretches the x-axis beyond the readings shown.
+        first, last = df["event_time"].min(), df["event_time"].max()
+        windows = load_windows()
+        visible = windows[(windows["end"] >= first) & (windows["start"] <= last)].copy()
+        visible["start"] = visible["start"].clip(lower=first)
+        visible["end"] = visible["end"].clip(upper=last)
+        if not visible.empty:
+            shading = alt.Chart(visible).mark_rect(color="orange", opacity=0.15).encode(
+                x="start:T", x2="end:T", tooltip=["window:N", "start:T", "end:T"])
+            layers.insert(0, shading)   # first layer = drawn behind the lines
+    st.altair_chart(alt.layer(*layers), alt="Temperature and 1-hour rolling average by event time, "
+                    "with red points on readings flagged as anomalous and labelled failure windows shaded")
 
 
 @st.fragment(run_every=None if paused else refresh_s)
@@ -141,6 +189,7 @@ def draw_live():
 
     show_status(m["updated_at"])
     show_kpis(m)
+    show_window_progress(m["last_event_time"])
 
     with st.container(border=True):
         st.subheader(f"Newest {curve_rows} readings")
