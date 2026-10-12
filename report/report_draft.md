@@ -260,6 +260,9 @@ anomalies per hour, and the last 10 flagged readings. When the newest data is mo
 changes to "No new data for N s. The dashboard is still refreshing."
 
 > TODO (student): add a screenshot of the live dashboard here (`report/screenshots/dashboard.png`).
+> TODO (student): the dashboard was extended on 2026-10-12 (history browser, Model / Hourly / Pipeline / Readings
+> log / Run report tabs, final run report). Describe the views you use and add screenshots of the Model view tab
+> (`report/screenshots/dashboard_model.png`) and the final run report (`report/screenshots/final_report.png`).
 
 ## 6. Results
 From one full replay at 200 events per second on a reset system (`report/results.md`):

@@ -9,13 +9,16 @@ and a Streamlit dashboard redraws itself every 2 seconds.
 ## Current state (update after every passed gate)
 - **All ten phases are done** (2026-10-11). Phase 9 report material, Phase 8 `47affad`, Phase 7 `0104737`, Phase 6 `037688b`
   (+ fix `fbd3f93`), Phase 5 `0095687`, Phase 4 `b1d0df1`, Phase 3 `9e63a77`, Phase 2 `00fe7e2`, Phase 1 `bdb9484`, Phase 0 `31dd643`.
+- **Dashboard upgrade** (2026-10-12, user request after Phase 9): history browser, 5 lazy tabs, 10 KPI tiles, final run
+  report (`dashboard/run_report.py`), theme in `.streamlit/config.toml`; verified with a full replay (see "Dashboard
+  upgrade decisions"). 34 tests.
 - **What is left is the student's own work:** screenshots into `report/screenshots/` (live dashboard, console consumer,
   consumer groups, MySQL counts), the "What I learned" paragraph and name/course details in `report/report_draft.md`
   (marked TODO), rewriting the draft in their own words, and a screen recording of the demo (DEMO.md).
 - The model is trained (`models/anomaly_model.joblib`, gitignored; retrain with `python -m src.train_model` on a fresh clone).
 - `.streamlit/secrets.toml` is generated (`python scripts/make_secrets.py`, gitignored).
-- Nothing is running. MySQL and the topic hold the Phase 9 full replay (20,695 sent, 20,683 stored, 284 flagged, 1,700
-  forecasts, both groups at lag 0) that `report/results.md` was collected from. Before a demo, use `python scripts/reset_demo.py`.
+- MySQL and the topic hold a short dashboard test run (900 events from 2013-12-10 at --rate 20), not the Phase 9 replay
+  (`report/results.md` keeps its numbers; a full replay reproduces them). Before a demo, use `python scripts/reset_demo.py`.
 - Git repo on branch `main`, remote `origin` on GitHub. Commit messages follow Conventional Commits, see "Git commit scheme" below.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
@@ -76,7 +79,8 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   unexpected errors are not hidden). `tests/test_evaluate.py` (5 hand-calculated tests: inside/outside/delay scoring,
   drop rule, z-score flag / no flag / flat history). `tests/test_hourly.py` (2: hour grouping incl. a boundary at :00),
   `tests/test_forecaster.py` (6: 5-min targets, 12 values inside the interval, a raising fit and NaN/inf windows give None,
-  first fit at reading 288 then every 12, repeats skipped). Total: 29 tests.
+  first fit at reading 288 then every 12, repeats skipped), `tests/test_run_report.py` (5: durations, pauses left out,
+  run summary on a 6-row fixture, unreached windows, Markdown). Total: 34 tests.
 - `tests/test_features.py` (5 hand-calculated tests), `tests/test_scoring.py` (7 tests: train/serve rows identical, warm-up
   across batches, no warm-up after restore, one call per batch, missing/old model refused; uses a `FakeModel` that records
   its input) + `pytest.ini` (`pythonpath = .`, so plain `pytest` works).
@@ -205,6 +209,34 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   curve has a rect layer for Window 2 clipped to the shown range; toggle off removes it. After the rest of the stream
   (--resume): "4 of 4", and no rect in the last 288 readings (no window there). Starting at 2013-12-10 instead of seq 2000
   gives 275 flags, not 284, because the cold-start warm-up then falls on different readings.
+
+## Dashboard upgrade decisions (2026-10-12, after Phase 9; keep them)
+- Asked for by the user (richer page for their manager, scroll back through history, final report at the end).
+  Ideas list: `improvement.md`. No new tables, columns, libraries or processor changes.
+- Layout inside the one fragment: state badge + status + `st.progress` replay position; 10 KPI tiles (2 sparklines);
+  curve card with `st.segmented_control` Follow live / Browse history; 5 lazy tabs; last 10 flags; page clock.
+- Browse history: a datetime `st.slider` (key `history_end`) with FIXED bounds = first/last stream timestamp of the
+  CSV (`stream_bounds()`, cached). Streamlit 1.65 resets a slider whose min/max change even with a key, so the
+  bounds must not grow with the data. Query `WHERE event_time <= :until ORDER BY event_time DESC LIMIT :n`.
+  Earlier/Later buttons shift by half the curve via callbacks; entering browse mode starts at the newest reading.
+  Verified live: the browsed range stays still across reruns while new readings arrive.
+- Tabs: `st.tabs(TABS, key="tab", on_change="rerun", bind="query-params")`; each body runs only if `tab.open`, so
+  only the open tab queries MySQL. AppTest can open a tab with `at.query_params["tab"] = "Pipeline"`.
+- `load_curve()` selects the feature columns plus `TIMESTAMPDIFF(MICROSECOND, produced_at, stored_at) / 1000 AS
+  lag_ms` (MySQL returns a DECIMAL: cast with `astype(float)`); SUM() also returns DECIMAL.
+- Wall-clock times (`stored_at`, `produced_at`) are shown in local time via `to_local()` (stored as naive UTC).
+- Run complete = the newest stored seq equals the CSV's last row (22694); a `--limit` run never completes. Then the
+  status says "Replay complete", the final report is drawn at the top and `st.balloons()` runs once per session.
+- The run report reads every reading through `load_run_data(version)`, the only `@st.cache_data` query: the key
+  (events_processed, updated_at) changes with every batch, so it never serves stale numbers.
+  `dashboard/run_report.py` reuses `scripts/evaluate.score_against_windows`, so the dashboard, evaluate.py and
+  collect_results.py agree. Full replay check (2026-10-12, --rate 200, dashboard open): 20,683 stored, 12 late,
+  284 flagged (1.37%), 4 of 4 windows (8/52/8/15 inside = 83), delays 975/165/210/2695 min, 1,700 fits,
+  MAE 1.50, 91.2% inside the interval: identical to report/results.md. Lag avg 82 ms, max 198 ms with the
+  dashboard open (51 / 148 ms in Phase 9 with it closed).
+- Chart specs were checked by rendering each one with vl-convert (all 15 render); the page was screenshotted with
+  headless Chrome (`google-chrome --headless=new --screenshot ... --virtual-time-budget=60000`).
+- A running `streamlit run` does not reload `dashboard/run_report.py` after an edit: restart it.
 
 ## Forecaster and hourly-window decisions from Phase 7 (keep them)
 - ARIMA (statsmodels 0.15): `ARIMA(list, order=(1,1,1)).fit()`, `get_forecast(steps=12)`, `.predicted_mean`,
@@ -377,6 +409,7 @@ A flag outside a labelled window is unlabelled, not proven false.
 
 ## Dashboard
 - Streamlit. Everything live sits inside one function decorated with st.fragment(run_every=...).
+- Since 2026-10-12 also: history browser, 5 lazy tabs, final run report (see "Dashboard upgrade decisions").
 - Database access through st.connection (settings from secrets.toml), every query via `run_query()` with no cache
   (st.connection's own `query()` caches forever by default and leaks pooled connections; see Phase 4/6 decisions).
 - The curve reads only the newest 288 rows (ORDER BY id DESC LIMIT n, then sorted ascending in pandas).
@@ -407,6 +440,7 @@ Real-Time-Machine-Temperature-Anomaly-Monitoring/
 ├── .claude/
 │   └── skills/                ✓ project skills (see "Skills available")
 ├── .streamlit/
+│   ├── config.toml            ✓ dashboard theme (committed, no secrets)
 │   └── secrets.toml           ✓ generated from .env by scripts/make_secrets.py (gitignored)
 ├── data/
 │   ├── machine_temperature_system_failure.csv   ✓ identical to the NAB upstream file
@@ -424,7 +458,8 @@ Real-Time-Machine-Temperature-Anomaly-Monitoring/
 │   ├── train_model.py         ✓ layer 4, offline: fit and save the model
 │   └── forecaster.py          ✓ extra: second consumer group, ARIMA forecast
 ├── dashboard/
-│   └── app.py                 ✓ layer 6: Streamlit
+│   ├── app.py                 ✓ layer 6: Streamlit
+│   └── run_report.py          ✓ run summary for the final report (pure pandas, tested)
 ├── scripts/
 │   ├── reset_demo.py          ✓ recreate topic, delete consumer group, empty tables
 │   ├── make_secrets.py        ✓ writes .streamlit/secrets.toml from .env
@@ -437,7 +472,8 @@ Real-Time-Machine-Temperature-Anomaly-Monitoring/
 │   ├── test_checks.py         ✓ 4 tests: retry loop and one-sentence exit
 │   ├── test_evaluate.py       ✓ 5 tests: window scoring, drop rule, z-score baseline
 │   ├── test_hourly.py         ✓ 2 tests: 1-hour tumbling window
-│   └── test_forecaster.py     ✓ 6 tests: forecast rows, ARIMA wrapper, refit cadence
+│   ├── test_forecaster.py     ✓ 6 tests: forecast rows, ARIMA wrapper, refit cadence
+│   └── test_run_report.py     ✓ 5 tests: run report durations, pauses, summary numbers
 └── report/
     ├── screenshots/           ✓ (empty)
     ├── evaluation.csv         ✓ comparison table (scripts/evaluate.py)

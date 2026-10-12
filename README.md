@@ -92,7 +92,7 @@ Run it again after any change to the `MYSQL_*` values in `.env`.
 
 ### 9. Run the tests
 ```bash
-pytest                            # expect: 29 passed
+pytest                            # expect: 34 passed
 ```
 
 ## Run the pipeline
@@ -140,6 +140,26 @@ python -m src.producer --resume                          # continue after Ctrl+C
   time (a tumbling window) and merged into `hourly_stats`: count, mean, min, max and flagged readings.
 - **Dashboard** (layer 6): one Streamlit fragment re-queries MySQL every 2 s (sidebar: 1 to 10 s, or
   pause). Every query goes to MySQL through `run_query()`; nothing is served from a cache.
+
+### What the dashboard shows
+- **Top:** machine state badge (Normal / Watch / Anomaly from the newest reading's score), the Live /
+  "No new data" / "Replay complete" status line, replay progress (row X of 20,695), and 10 KPI tiles.
+- **Temperature curve:** temperature, rolling average, volatility band (± 2 rolling std), red flags,
+  failure windows and the ARIMA forecast. Hover any point to see its event time and when it arrived.
+  Switch **Follow live → Browse history** to scroll back: the slider and the Earlier / Later buttons
+  move through every stored reading while new data keeps arriving (the tiles stay live, the browsed
+  chart stays still). **Back to live** returns to the newest readings.
+- **Tabs** (only the open tab queries MySQL; the open tab is kept in the URL, e.g. `?tab=Pipeline`):
+  *Model view* (anomaly score, score histogram, deviation vs delta scatter, the three window features),
+  *Hourly view* (min/avg/max per hour, flags per hour, day × hour heatmap of the whole run),
+  *Pipeline* (lag per reading, forecast vs actual with MAE, run timeline: readings per wall-clock
+  minute), *Readings log* (scrollable table of the readings on the curve) and *Run report* (the run so far).
+- **Final run report:** when the last stream row is stored, the page says "Replay complete" and shows
+  the report at the top: total and active time (pauses left out), machine time replayed, replay speed,
+  throughput, flags, windows caught with their detection delay, peak and minimum, lag, forecast
+  accuracy, and a **Download report (.md)** button. The numbers come from `dashboard/run_report.py`
+  (tested in `tests/test_run_report.py`) and match `report/results.md` after a full replay.
+- The theme is in `.streamlit/config.toml` (no secrets in it).
 
 ## Evaluate the model against the labelled failures
 Offline (no Kafka or MySQL needed): replays the stream rows in memory exactly as the pipeline does and
