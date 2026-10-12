@@ -92,7 +92,7 @@ Run it again after any change to the `MYSQL_*` values in `.env`.
 
 ### 9. Run the tests
 ```bash
-pytest                            # expect: 39 passed
+pytest                            # expect: 41 passed
 ```
 
 ## Run the pipeline
@@ -146,6 +146,10 @@ python -m src.producer --resume                          # continue after Ctrl+C
   "No new data" / "Replay complete" status line, replay progress (row X of 20,695), and 10 KPI tiles.
 - **Temperature curve:** the newest 144 readings (12 h of machine time, chosen automatically): temperature, rolling average, volatility band (± 2 rolling std), red flags,
   failure windows and the ARIMA forecast. Hover any point to see its event time and when it arrived.
+  Red points are flagged readings (anomaly score below 0), orange points are "watch" readings (score 0 to
+  0.05). Directly under the curve, on the same time axis, the **anomaly score strip** shows what the model
+  thought of every reading: a slow drift moves the temperature but leaves the score high; a sudden jump or
+  spike pushes it below the dashed line at 0.
   Switch **Follow live → Browse history** to scroll back: the slider and the Earlier / Later buttons
   move through every stored reading while new data keeps arriving (the tiles stay live, the browsed
   chart stays still). **Back to live** returns to the newest readings.
@@ -160,7 +164,7 @@ python -m src.producer --resume                          # continue after Ctrl+C
   accuracy, and a **Download report (.md)** button. The numbers come from `dashboard/run_report.py`
   (tested in `tests/test_run_report.py`) and match `report/results.md` after a full replay.
 - **Zoomed temperature axis** (sidebar toggle, on by default): the axis fits the readings shown, in steps of
-  10 and at least 20 wide, so normal variation is visible instead of a flat line on a 0–115 scale. It only
+  10 and at least 40 wide, so normal variation is visible without making a slow drift look like a crash. It only
   changes when the readings cross a multiple of 10. Turn it off for the fixed 0–115 axis.
 - The theme is in `.streamlit/config.toml` (no secrets in it).
 

@@ -11,7 +11,8 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   (+ fix `fbd3f93`), Phase 5 `0095687`, Phase 4 `b1d0df1`, Phase 3 `9e63a77`, Phase 2 `00fe7e2`, Phase 1 `bdb9484`, Phase 0 `31dd643`.
 - **Dashboard upgrade** (2026-10-12, user request after Phase 9): history browser, 5 lazy tabs, 10 KPI tiles, final run
   report (`dashboard/run_report.py`), theme in `.streamlit/config.toml`; verified with a full replay (see "Dashboard
-  upgrade decisions"), zoomed temperature axis (`dashboard/chart_scale.py`). 39 tests.
+  upgrade decisions"), zoomed temperature axis (`dashboard/chart_scale.py`), anomaly-score strip under the curve.
+  41 tests.
 - **What is left is the student's own work:** screenshots into `report/screenshots/` (live dashboard, console consumer,
   consumer groups, MySQL counts), the "What I learned" paragraph and name/course details in `report/report_draft.md`
   (marked TODO), rewriting the draft in their own words, and a screen recording of the demo (DEMO.md).
@@ -80,8 +81,8 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   drop rule, z-score flag / no flag / flat history). `tests/test_hourly.py` (2: hour grouping incl. a boundary at :00),
   `tests/test_forecaster.py` (6: 5-min targets, 12 values inside the interval, a raising fit and NaN/inf windows give None,
   first fit at reading 288 then every 12, repeats skipped), `tests/test_run_report.py` (5: durations, pauses left out,
-  run summary on a 6-row fixture, unreached windows, Markdown), `tests/test_chart_scale.py` (5: zoomed axis rounding,
-  minimum span, cap at 115, zoom off, no readings). Total: 39 tests.
+  run summary on a 6-row fixture, unreached windows, Markdown), `tests/test_chart_scale.py` (7: zoomed axis rounding,
+  40-unit minimum span widened on both sides, cap at 115, zoom off, no readings). Total: 41 tests.
 - `tests/test_features.py` (5 hand-calculated tests), `tests/test_scoring.py` (7 tests: train/serve rows identical, warm-up
   across batches, no warm-up after restore, one call per batch, missing/old model refused; uses a `FakeModel` that records
   its input) + `pytest.ini` (`pythonpath = .`, so plain `pytest` works).
@@ -244,6 +245,20 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   readings only (forecast and volatility bands are clipped), so the axis changes only when readings cross a ten:
   checked live, 0-110 -> 30-110 -> 60-110 -> 80-110 as the 16 Dec collapse left the 24 h view. Applied to the main
   curve, the hourly band and forecast-vs-actual. Presentation only: no data changed.
+- "No flags for a while / did the dashboard break detection?" (user, 2026-10-12, a 97.5 -> 84.8 drop on 22-23 Dec
+  with no red points). Audit: `git diff v1.0.0 -- src/ db/ scripts/ requirements.txt` is empty, the model file is the
+  2026-10-11 one, and all 6,150 stored readings have is_anomaly and anomaly_score equal to an offline recompute from the
+  CSV + saved model (score diff 0.0); the full stream still gives 284 flags. The drop is a slow drift (12 h, biggest
+  step 2.2, rolling std <= 2.0, lowest score +0.115); flagged readings have median rolling std 6.07 vs 0.79 for normal
+  ones. No flags between 18 and 26 Dec is the model's real behaviour; the next flags are on 27-28 Dec (36).
+  The zoom made it look worse: a 20-unit minimum span let a drift fill 70% of the chart. Fixes: minimum span 40,
+  widened on both sides; "watch" points (0 < score <= WATCH_SCORE 0.05, 1.3% of the stream) in orange; an
+  anomaly-score strip under the curve (dashed cut-off at 0, orange watch band) sharing an explicit x domain
+  (`vl_time()` -> `alt.DateTime`) and y-axis `minExtent=maxExtent=50` so both plots line up (Vega-Lite axis docs,
+  Context7). The Model view tab no longer has its own score-over-time chart. Contamination is unchanged (0.01).
+- The producer saves `.producer_state` only every 50 events and on Ctrl+C; a SIGTERM/kill (e.g. stopping a Claude Code
+  background task) skips the final save, so `--resume` re-sends up to 49 readings. The processor drops them as late
+  (seen: 25 late, 0 duplicate offsets or seqs). Stop the producer with Ctrl+C before a --resume demo.
 
 ## Forecaster and hourly-window decisions from Phase 7 (keep them)
 - ARIMA (statsmodels 0.15): `ARIMA(list, order=(1,1,1)).fit()`, `get_forecast(steps=12)`, `.predicted_mean`,
@@ -422,7 +437,7 @@ A flag outside a labelled window is unlabelled, not proven false.
 - The curve reads only the newest `CURVE_ROWS` = 144 rows, 12 h of event time (ORDER BY id DESC LIMIT n, then sorted
   ascending in pandas). It was a 12-2016 slider (default 288) until 2026-10-12; the user asked for an automatic
   length because a long curve (e.g. 504 rows) squeezed the changes together.
-- Temperature y-axis: zoomed by default (`chart_scale.y_domain`: readings ± 2, rounded out to tens, at least 20 wide,
+- Temperature y-axis: zoomed by default (`chart_scale.y_domain`: readings ± 2, rounded out to tens, at least 40 wide,
   inside 0-115), fixed 0-115 with the sidebar zoom toggle off. "Waiting for data" when tables are empty. A "No new data for N s" warning when updated_at is more than 10 s old.
 - If the dashboard looks frozen, check in this order: is the producer running, is the processor's batch log moving, is any query cached.
 
@@ -484,7 +499,7 @@ Real-Time-Machine-Temperature-Anomaly-Monitoring/
 │   ├── test_evaluate.py       ✓ 5 tests: window scoring, drop rule, z-score baseline
 │   ├── test_hourly.py         ✓ 2 tests: 1-hour tumbling window
 │   ├── test_forecaster.py     ✓ 6 tests: forecast rows, ARIMA wrapper, refit cadence
-│   ├── test_chart_scale.py    ✓ 5 tests: zoomed axis
+│   ├── test_chart_scale.py    ✓ 7 tests: zoomed axis
 │   └── test_run_report.py     ✓ 5 tests: run report durations, pauses, summary numbers
 └── report/
     ├── screenshots/           ✓ (empty)
