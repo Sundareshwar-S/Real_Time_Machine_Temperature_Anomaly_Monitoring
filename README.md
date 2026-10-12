@@ -92,7 +92,7 @@ Run it again after any change to the `MYSQL_*` values in `.env`.
 
 ### 9. Run the tests
 ```bash
-pytest                            # expect: 34 passed
+pytest                            # expect: 39 passed
 ```
 
 ## Run the pipeline
@@ -159,6 +159,9 @@ python -m src.producer --resume                          # continue after Ctrl+C
   throughput, flags, windows caught with their detection delay, peak and minimum, lag, forecast
   accuracy, and a **Download report (.md)** button. The numbers come from `dashboard/run_report.py`
   (tested in `tests/test_run_report.py`) and match `report/results.md` after a full replay.
+- **Zoomed temperature axis** (sidebar toggle, on by default): the axis fits the readings shown, in steps of
+  10 and at least 20 wide, so normal variation is visible instead of a flat line on a 0–115 scale. It only
+  changes when the readings cross a multiple of 10. Turn it off for the fixed 0–115 axis.
 - The theme is in `.streamlit/config.toml` (no secrets in it).
 
 ## Evaluate the model against the labelled failures

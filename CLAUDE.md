@@ -11,7 +11,7 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   (+ fix `fbd3f93`), Phase 5 `0095687`, Phase 4 `b1d0df1`, Phase 3 `9e63a77`, Phase 2 `00fe7e2`, Phase 1 `bdb9484`, Phase 0 `31dd643`.
 - **Dashboard upgrade** (2026-10-12, user request after Phase 9): history browser, 5 lazy tabs, 10 KPI tiles, final run
   report (`dashboard/run_report.py`), theme in `.streamlit/config.toml`; verified with a full replay (see "Dashboard
-  upgrade decisions"). 34 tests.
+  upgrade decisions"), zoomed temperature axis (`dashboard/chart_scale.py`). 39 tests.
 - **What is left is the student's own work:** screenshots into `report/screenshots/` (live dashboard, console consumer,
   consumer groups, MySQL counts), the "What I learned" paragraph and name/course details in `report/report_draft.md`
   (marked TODO), rewriting the draft in their own words, and a screen recording of the demo (DEMO.md).
@@ -80,7 +80,8 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   drop rule, z-score flag / no flag / flat history). `tests/test_hourly.py` (2: hour grouping incl. a boundary at :00),
   `tests/test_forecaster.py` (6: 5-min targets, 12 values inside the interval, a raising fit and NaN/inf windows give None,
   first fit at reading 288 then every 12, repeats skipped), `tests/test_run_report.py` (5: durations, pauses left out,
-  run summary on a 6-row fixture, unreached windows, Markdown). Total: 34 tests.
+  run summary on a 6-row fixture, unreached windows, Markdown), `tests/test_chart_scale.py` (5: zoomed axis rounding,
+  minimum span, cap at 115, zoom off, no readings). Total: 39 tests.
 - `tests/test_features.py` (5 hand-calculated tests), `tests/test_scoring.py` (7 tests: train/serve rows identical, warm-up
   across batches, no warm-up after restore, one call per batch, missing/old model refused; uses a `FakeModel` that records
   its input) + `pytest.ini` (`pythonpath = .`, so plain `pytest` works).
@@ -159,7 +160,8 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - The pause toggle sets `run_every=None`. Sidebar widgets are outside the fragment, so changing one reruns the whole
   script (Streamlit docs: "widget outside a fragment -> full script rerun") and the fragment picks up the new value.
 - Chart: `transform_fold` of temperature + rolling_avg into coloured lines, a red point layer from `is_anomaly == 1`,
-  y fixed with `alt.Y(...).scale(domain=[0, 115])`. The page footer shows its own refresh time.
+  y fixed with `alt.Y(...).scale(domain=[0, 115])` (since 2026-10-12 zoomed by default, see Dashboard upgrade
+  decisions). The page footer shows its own refresh time.
 - Verified headless with `streamlit.testing.v1.AppTest` against the real MySQL (empty -> "Waiting for data"; stale ->
   warning; live -> "Live"); the chart's datasets were read back for slider 12/288/1000/2016 and equal the newest N rows.
 - `streamlit run` binds all interfaces (Network URL shown); add `--server.address localhost` to keep it local.
@@ -237,6 +239,11 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - Chart specs were checked by rendering each one with vl-convert (all 15 render); the page was screenshotted with
   headless Chrome (`google-chrome --headless=new --screenshot ... --virtual-time-budget=60000`).
 - A running `streamlit run` does not reload `dashboard/run_report.py` after an edit: restart it.
+- Zoomed y-axis (user request: the curve looked flat to their manager). Measured: in a 24 h view (288 readings) the
+  temperature moves a median of 17.4 units (25-75%: 11.6-30.7), about 15% of a 0-115 axis. `y_domain()` uses the
+  readings only (forecast and volatility bands are clipped), so the axis changes only when readings cross a ten:
+  checked live, 0-110 -> 30-110 -> 60-110 -> 80-110 as the 16 Dec collapse left the 24 h view. Applied to the main
+  curve, the hourly band and forecast-vs-actual. Presentation only: no data changed.
 
 ## Forecaster and hourly-window decisions from Phase 7 (keep them)
 - ARIMA (statsmodels 0.15): `ARIMA(list, order=(1,1,1)).fit()`, `get_forecast(steps=12)`, `.predicted_mean`,
@@ -413,7 +420,8 @@ A flag outside a labelled window is unlabelled, not proven false.
 - Database access through st.connection (settings from secrets.toml), every query via `run_query()` with no cache
   (st.connection's own `query()` caches forever by default and leaks pooled connections; see Phase 4/6 decisions).
 - The curve reads only the newest 288 rows (ORDER BY id DESC LIMIT n, then sorted ascending in pandas).
-- Y-axis fixed at 0-115. "Waiting for data" when tables are empty. A "No new data for N s" warning when updated_at is more than 10 s old.
+- Temperature y-axis: zoomed by default (`chart_scale.y_domain`: readings ± 2, rounded out to tens, at least 20 wide,
+  inside 0-115), fixed 0-115 with the sidebar zoom toggle off. "Waiting for data" when tables are empty. A "No new data for N s" warning when updated_at is more than 10 s old.
 - If the dashboard looks frozen, check in this order: is the producer running, is the processor's batch log moving, is any query cached.
 
 ## Repository layout
@@ -459,6 +467,7 @@ Real-Time-Machine-Temperature-Anomaly-Monitoring/
 │   └── forecaster.py          ✓ extra: second consumer group, ARIMA forecast
 ├── dashboard/
 │   ├── app.py                 ✓ layer 6: Streamlit
+│   ├── chart_scale.py         ✓ zoomed temperature axis (tested)
 │   └── run_report.py          ✓ run summary for the final report (pure pandas, tested)
 ├── scripts/
 │   ├── reset_demo.py          ✓ recreate topic, delete consumer group, empty tables
@@ -473,6 +482,7 @@ Real-Time-Machine-Temperature-Anomaly-Monitoring/
 │   ├── test_evaluate.py       ✓ 5 tests: window scoring, drop rule, z-score baseline
 │   ├── test_hourly.py         ✓ 2 tests: 1-hour tumbling window
 │   ├── test_forecaster.py     ✓ 6 tests: forecast rows, ARIMA wrapper, refit cadence
+│   ├── test_chart_scale.py    ✓ 5 tests: zoomed axis
 │   └── test_run_report.py     ✓ 5 tests: run report durations, pauses, summary numbers
 └── report/
     ├── screenshots/           ✓ (empty)
