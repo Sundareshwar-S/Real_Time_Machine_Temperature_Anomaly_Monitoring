@@ -17,8 +17,8 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   (marked TODO), rewriting the draft in their own words, and a screen recording of the demo (DEMO.md).
 - The model is trained (`models/anomaly_model.joblib`, gitignored; retrain with `python -m src.train_model` on a fresh clone).
 - `.streamlit/secrets.toml` is generated (`python scripts/make_secrets.py`, gitignored).
-- MySQL and the topic hold a short dashboard test run (900 events from 2013-12-10 at --rate 20), not the Phase 9 replay
-  (`report/results.md` keeps its numbers; a full replay reproduces them). Before a demo, use `python scripts/reset_demo.py`.
+- Nothing is running and the system is reset (2026-10-12): empty tables, empty topic, no consumer groups, no
+  `.producer_state`. `report/results.md` keeps the Phase 9 numbers; a full replay reproduces them.
 - Git repo on branch `main`, remote `origin` on GitHub. Commit messages follow Conventional Commits, see "Git commit scheme" below.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
