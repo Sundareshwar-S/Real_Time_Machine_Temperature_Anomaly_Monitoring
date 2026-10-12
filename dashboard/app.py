@@ -38,6 +38,9 @@ STALE_AFTER_S = 10       # older than this, the status line warns that no new da
 RECENT_FLAGS = 10        # rows in the table of flagged readings
 WATCH_SCORE = 0.05       # an anomaly score between 0 and this is close to the model's cut-off: "Watch"
 SPARK_ROWS = 48          # readings in the tile sparklines (4 hours of event time)
+# Readings on the curve: 12 hours of event time. Fewer readings than a full day, so each change is wide
+# enough to see, and at --rate 10 a 2 s refresh moves the curve by 20 of 144 points (about 14%).
+CURVE_ROWS = 144
 TIMELINE_MINUTES = 240   # rows in the run timeline (one per wall-clock minute)
 FORECAST_CHECK = 288     # newest forecast points compared with the reading that actually arrived
 STEP = timedelta(minutes=5)   # one reading every 5 minutes of event time
@@ -56,8 +59,6 @@ st.caption("Live pipeline: CSV replay → Kafka → Python processor → Isolati
 
 with st.sidebar:
     refresh_s = st.slider("Refresh every (seconds)", min_value=1, max_value=10, value=2)
-    curve_rows = st.slider("Readings on the curve", min_value=12, max_value=2016, value=288, step=12,
-                           help="288 readings = 24 hours of event time (one every 5 minutes).")
     paused = st.toggle("Pause refresh", help="Stops the timed refresh. The data keeps arriving in MySQL.")
     show_windows = st.toggle("Show known failure windows", value=True,
                              help="Shade NAB's four labelled failure windows behind the curve.")
@@ -403,7 +404,7 @@ def history_controls():
     """Slider and buttons to scroll back through every stored reading. Returns the chosen end time."""
     bounds = stream_bounds()
     st.session_state.setdefault("history_end", st.session_state.latest_event_time)
-    half = max(1, curve_rows // 2)
+    half = CURVE_ROWS // 2
     with st.container(horizontal=True, vertical_alignment="bottom"):
         st.slider("Show readings up to (event time)", min_value=bounds["first"], max_value=bounds["last"],
                   step=STEP, format="D MMM YYYY, HH:mm", key="history_end")
@@ -424,7 +425,7 @@ def show_curve_card(live):
                                         key="curve_mode", on_change=enter_browse, label_visibility="collapsed")
         if mode == "Browse history":
             until = history_controls()
-            view = load_curve(curve_rows, until)
+            view = load_curve(CURVE_ROWS, until)
             if view.empty:
                 st.caption("No readings stored at or before this time yet.")
                 return view
@@ -776,7 +777,7 @@ def live_view():
 
 def draw_live():
     metrics = load_metrics()
-    live = load_curve(curve_rows)
+    live = load_curve(CURVE_ROWS)
     if metrics.empty or live.empty:
         st.info("Waiting for data. Start the processor, then the producer.", icon=":material/hourglass_empty:")
         return
