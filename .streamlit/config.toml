@@ -1,0 +1,39 @@
+# Dashboard theme (no secrets here; the database settings live in secrets.toml).
+# Adapted from the developing-with-streamlit skill's financial-dashboard theme, without web
+# fonts, so the page looks the same when the demo machine is offline.
+# The chart series colours in dashboard/app.py (COLORS) use the same palette.
+
+[theme]
+base = "dark"
+primaryColor = "#60A5FA"
+backgroundColor = "#0F172A"
+secondaryBackgroundColor = "#1E293B"
+codeBackgroundColor = "#1E293B"
+textColor = "#F1F5F9"
+linkColor = "#60A5FA"
+borderColor = "#334155"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "8px"
+buttonRadius = "8px"
+
+greenColor = "#34D399"
+redColor = "#F87171"
+yellowColor = "#FBBF24"
+orangeColor = "#FB923C"
+blueColor = "#60A5FA"
+violetColor = "#A78BFA"
+grayColor = "#94A3B8"
+
+chartCategoricalColors = ["#60A5FA", "#34D399", "#A78BFA", "#F87171", "#FBBF24", "#38BDF8", "#94A3B8", "#FB923C"]
+
+dataframeBorderColor = "#334155"
+dataframeHeaderBackgroundColor = "#1E293B"
+dataframeHeaderTextColor = "#F8FAFC"
+
+[theme.sidebar]
+backgroundColor = "#111C33"
+secondaryBackgroundColor = "#1E293B"
+textColor = "#F1F5F9"
+borderColor = "#334155"
+primaryColor = "#60A5FA"
