@@ -48,10 +48,13 @@ LOCAL_TZ = datetime.now().astimezone().tzinfo
 TABS = ["Model view", "Hourly view", "Pipeline", "Readings log", "Run report"]
 
 # One colour per series, used by every chart (the same palette as .streamlit/config.toml).
-COLORS = {"temperature": "#60A5FA", "rolling_avg": "#34D399", "flag": "#F87171",
+COLORS = {"temperature": "#60A5FA", "rolling_avg": "#34D399", "flag": "#F87171", "watch": "#FB923C",
           "forecast": "#94A3B8", "window": "#FBBF24", "normal": "#60A5FA"}
 SERIES = alt.Scale(domain=["temperature", "rolling_avg"], range=[COLORS["temperature"], COLORS["rolling_avg"]])
-FLAG_COLORS = alt.Scale(domain=["Normal", "Flagged"], range=[COLORS["normal"], COLORS["flag"]])
+FLAG_COLORS = alt.Scale(domain=["Normal", "Watch", "Flagged"],
+                        range=[COLORS["normal"], COLORS["watch"], COLORS["flag"]])
+MARKERS = alt.Scale(domain=["Watch", "Flagged"], range=[COLORS["watch"], COLORS["flag"]])
+Y_AXIS = {"minExtent": 50, "maxExtent": 50}   # same room for y labels, so the curve and the score strip line up
 
 st.set_page_config(page_title="Machine temperature monitor", page_icon=":material/thermostat:", layout="wide")
 st.title("Machine temperature monitor", icon=":material/thermostat:")
@@ -147,7 +150,10 @@ def load_curve(n, until=None):
                        "ORDER BY event_time DESC LIMIT :n", n=n, until=until)
     df["lag_ms"] = df["lag_ms"].astype(float)   # MySQL returns the division as a DECIMAL
     df["stored_at"] = to_local(df["stored_at"])
-    df["flag"] = df["is_anomaly"].map({0: "Normal", 1: "Flagged"})
+    # The model's view of each reading: flagged (score below 0), watch (close to the cut-off) or normal.
+    df["flag"] = "Normal"
+    df.loc[df["anomaly_score"] <= WATCH_SCORE, "flag"] = "Watch"
+    df.loc[df["is_anomaly"] == 1, "flag"] = "Flagged"
     df["band_low"] = df["rolling_avg"] - 2 * df["rolling_std"]
     df["band_high"] = df["rolling_avg"] + 2 * df["rolling_std"]
     return df.sort_values("event_time")
@@ -358,11 +364,16 @@ def window_shading(df):
         x="start:T", x2="end:T", tooltip=["window:N", "start:T", "end:T"])]
 
 
-def show_curve(df, forecast):
+def vl_time(t):
+    """A pandas time as a Vega-Lite date, read as local time like the chart data."""
+    return alt.DateTime(year=t.year, month=t.month, date=t.day, hours=t.hour, minutes=t.minute)
+
+
+def show_curve(df, forecast, x_domain):
     """Draw the main chart. Returns the temperature axis it used, for the caption."""
     # From the readings only: the bands are clipped, so a wide forecast interval cannot stretch the axis.
     domain = list(y_domain(df["temperature"], zoom_axis))
-    base = alt.Chart(df).encode(x=alt.X("event_time:T", title="Event time"))
+    base = alt.Chart(df).encode(x=alt.X("event_time:T", title=None).scale(domain=x_domain))
     layers = window_shading(df) if show_windows else []   # first layer = drawn behind the lines
     if show_band:
         layers.append(base.mark_area(color=COLORS["rolling_avg"], opacity=0.15, clip=True).encode(
@@ -370,10 +381,13 @@ def show_curve(df, forecast):
     # Two lines from one data set: fold the two columns into (series, value) pairs
     # so Altair draws one coloured line per series, with a legend.
     layers.append(base.transform_fold(["temperature", "rolling_avg"], as_=["series", "value"]).mark_line().encode(
-        y=alt.Y("value:Q", title="Temperature").scale(domain=domain),
+        y=alt.Y("value:Q", title="Temperature").scale(domain=domain).axis(**Y_AXIS),
         color=alt.Color("series:N", title=None).scale(SERIES).legend(orient="top")))
-    layers.append(alt.Chart(df[df["is_anomaly"] == 1]).mark_point(color=COLORS["flag"], filled=True, size=70).encode(
-        x="event_time:T", y=alt.Y("temperature:Q").scale(domain=domain)))
+    # Orange = watch (score close to 0), red = flagged (score below 0): what the model thought of each reading.
+    layers.append(alt.Chart(df[df["flag"] != "Normal"]).mark_point(filled=True, opacity=1).encode(
+        x="event_time:T", y=alt.Y("temperature:Q").scale(domain=domain),
+        color=alt.Color("flag:N", title=None).scale(MARKERS).legend(orient="top"),
+        size=alt.Size("flag:N").scale(domain=["Watch", "Flagged"], range=[40, 90]).legend(None)))
     if not forecast.empty:
         layers += forecast_layers(forecast, domain)
     # Hover anywhere: the nearest reading gets a vertical rule and a tooltip that
@@ -387,10 +401,38 @@ def show_curve(df, forecast):
                  alt.Tooltip("anomaly_score:Q", format="+.3f", title="anomaly score"),
                  alt.Tooltip("flag:N", title="model"),
                  alt.Tooltip("stored_at:T", format="%H:%M:%S", title="arrived at")]).add_params(hover))
-    st.altair_chart(alt.layer(*layers).properties(height=380),
+    # Two colour legends (lines, model markers): keep their scales apart.
+    st.altair_chart(alt.layer(*layers).resolve_scale(color="independent").properties(height=420),
                     alt="Temperature and 1-hour rolling average by event time, with a volatility band, red points on "
                         "readings flagged as anomalous, labelled failure windows shaded and the ARIMA forecast")
     return domain
+
+
+def show_score_strip(df, x_domain):
+    """The model's anomaly score under the curve, on the same time axis.
+
+    Below 0 the reading is flagged; the orange band (0 to WATCH_SCORE) is close
+    to the cut-off. A slow drift moves the temperature but leaves the score
+    high; a sudden jump or spike pushes it down.
+    """
+    base = alt.Chart(df).encode(x=alt.X("event_time:T", title="Event time").scale(domain=x_domain))
+    watch = alt.Chart(pd.DataFrame({"low": [0.0], "high": [WATCH_SCORE]})).mark_rect(
+        color=COLORS["watch"], opacity=0.18).encode(y="low:Q", y2="high:Q")
+    line = base.mark_line(color=COLORS["temperature"], strokeWidth=1.5).encode(
+        y=alt.Y("anomaly_score:Q", title="Score").axis(**Y_AXIS, tickCount=4))
+    cut = alt.Chart(pd.DataFrame({"score": [0.0]})).mark_rule(color=COLORS["flag"], strokeDash=[4, 4]).encode(y="score:Q")
+    points = alt.Chart(df[df["flag"] != "Normal"]).mark_point(filled=True, opacity=1, size=50).encode(
+        x="event_time:T", y="anomaly_score:Q", color=alt.Color("flag:N").scale(MARKERS).legend(None),
+        tooltip=[alt.Tooltip("event_time:T", format="%d %b %Y %H:%M"), alt.Tooltip("anomaly_score:Q", format="+.3f"),
+                 alt.Tooltip("temperature:Q", format=".2f"), alt.Tooltip("flag:N", title="model")])
+    st.altair_chart(alt.layer(watch, line, cut, points).properties(height=130),
+                    alt="IsolationForest anomaly score under the temperature curve, cut-off at zero, "
+                        "watch band from 0 to 0.05, flagged readings in red")
+
+
+MODEL_NOTE = ("Red = flagged (anomaly score below 0), orange = watch (score 0 to "
+              f"{WATCH_SCORE}). The model flags sudden jumps and spikes; a slow drift moves the temperature "
+              "but not the score. ")
 
 
 def axis_note(domain):
@@ -430,40 +472,33 @@ def show_curve_card(live):
                 st.caption("No readings stored at or before this time yet.")
                 return view
             # The tiles above keep updating; this chart only moves when you move the slider.
-            domain = show_curve(view, pd.DataFrame())
+            x_domain = [vl_time(view["event_time"].min()), vl_time(view["event_time"].max())]
+            domain = show_curve(view, pd.DataFrame(), x_domain)
+            show_score_strip(view, x_domain)
             st.caption(f"Browsing history: {len(view):,} readings from {view['event_time'].min():%d %b %H:%M} "
                        f"to {view['event_time'].max():%d %b %Y %H:%M} (event time), which arrived between "
                        f"{view['stored_at'].min():%H:%M:%S} and {view['stored_at'].max():%H:%M:%S}. "
                        f"New data keeps arriving: newest reading {live['event_time'].max():%d %b %Y %H:%M}. "
-                       + axis_note(domain))
+                       + MODEL_NOTE + axis_note(domain))
             return view
         forecast = load_forecast()
-        domain = show_curve(live, forecast)
+        # Both charts end at the last forecast point (or the newest reading), so they line up.
+        last = live["event_time"].max() if forecast.empty else max(live["event_time"].max(), forecast["target_time"].max())
+        x_domain = [vl_time(live["event_time"].min()), vl_time(last)]
+        domain = show_curve(live, forecast, x_domain)
+        show_score_strip(live, x_domain)
         if forecast.empty:
             st.caption(f"Newest {len(live):,} readings. No forecast yet: the forecaster needs 288 readings "
-                       "(24 h of event time) for its first fit. " + axis_note(domain))
+                       "(24 h of event time) for its first fit. " + MODEL_NOTE + axis_note(domain))
         else:
             st.caption(f"Newest {len(live):,} readings. Dashed grey: ARIMA(1,1,1) forecast of the next hour, made at "
                        f"event time {forecast['made_at_event_time'].iloc[0]:%d %b %H:%M}; grey band = 95% interval. "
-                       "Green band = rolling average ± 2 standard deviations. Hover for details. " + axis_note(domain))
+                       "Green band = rolling average ± 2 standard deviations. Hover for details. "
+                       + MODEL_NOTE + axis_note(domain))
         return live
 
 
 # ---------------------------------------------------------------- tab: model view (layer 4)
-
-def show_score_chart(df):
-    """The model's decision_function over time: below 0 means the reading is flagged."""
-    base = alt.Chart(df).encode(x=alt.X("event_time:T", title="Event time"))
-    line = base.mark_line(color=COLORS["temperature"], strokeWidth=1.5).encode(
-        y=alt.Y("anomaly_score:Q", title="Anomaly score"))
-    cut = alt.Chart(pd.DataFrame({"score": [0.0]})).mark_rule(color=COLORS["flag"], strokeDash=[4, 4]).encode(y="score:Q")
-    flags = alt.Chart(df[df["is_anomaly"] == 1]).mark_point(color=COLORS["flag"], filled=True, size=60).encode(
-        x="event_time:T", y="anomaly_score:Q",
-        tooltip=[alt.Tooltip("event_time:T", format="%d %b %Y %H:%M"), alt.Tooltip("anomaly_score:Q", format="+.3f"),
-                 alt.Tooltip("temperature:Q", format=".2f")])
-    st.altair_chart(alt.layer(line, cut, flags).properties(height=220),
-                    alt="IsolationForest anomaly score by event time, with the cut-off at zero and flagged readings in red")
-
 
 def show_score_histogram(df):
     bars = alt.Chart(df).mark_bar(opacity=0.85).encode(
@@ -501,8 +536,8 @@ def show_feature(df, column, title, mark="line"):
 
 def show_model_tab(view):
     st.caption("The IsolationForest scores four features per reading: temperature, deviation from the 1-hour mean, "
-               "1-hour standard deviation and change since the previous reading. A score below 0 is flagged.")
-    show_score_chart(view)
+               "1-hour standard deviation and change since the previous reading. A score below 0 is flagged; the score "
+               "over time is drawn under the temperature curve.")
     left, right = st.columns(2)
     with left:
         show_score_histogram(view)
