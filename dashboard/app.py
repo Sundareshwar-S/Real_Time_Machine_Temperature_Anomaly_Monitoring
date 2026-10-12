@@ -30,11 +30,11 @@ from streamlit.errors import StreamlitAPIException
 # the repo root so the page can read its file settings from src/config.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dashboard import run_report  # noqa: E402
+from dashboard.chart_scale import FULL_SCALE, y_domain  # noqa: E402
 from scripts import evaluate  # noqa: E402
 from src import config  # noqa: E402
 
 STALE_AFTER_S = 10       # older than this, the status line warns that no new data arrives
-Y_DOMAIN = [0, 115]      # fixed temperature axis, so the chart does not jump between refreshes
 RECENT_FLAGS = 10        # rows in the table of flagged readings
 WATCH_SCORE = 0.05       # an anomaly score between 0 and this is close to the model's cut-off: "Watch"
 SPARK_ROWS = 48          # readings in the tile sparklines (4 hours of event time)
@@ -63,6 +63,9 @@ with st.sidebar:
                              help="Shade NAB's four labelled failure windows behind the curve.")
     show_band = st.toggle("Show volatility band", value=True,
                           help="Rolling average ± 2 rolling standard deviations (the last 12 readings).")
+    zoom_axis = st.toggle("Zoom temperature axis", value=True,
+                          help="Fit the temperature axis to the readings shown, in steps of 10. "
+                               f"Off = fixed {FULL_SCALE[0]}–{FULL_SCALE[1]} scale.")
 
 # Widget state used by the history browser, set once per browser session.
 st.session_state.setdefault("curve_mode", "Follow live")
@@ -323,17 +326,17 @@ def show_kpis(m, live):
 
 # ---------------------------------------------------------------- main curve
 
-def forecast_layers(forecast):
+def forecast_layers(forecast, domain):
     """The ARIMA forecast: a dashed line with its 95% interval as a faint band.
 
-    clip=True keeps the band inside the fixed 0-115 axis when the interval is
-    wide, for example during the collapse on 16 Dec.
+    clip=True keeps the band inside the axis when the interval is wide, for
+    example during the collapse on 16 Dec, instead of stretching the axis.
     """
     base = alt.Chart(forecast).encode(x="target_time:T")
     band = base.mark_area(color=COLORS["forecast"], opacity=0.2, clip=True).encode(
-        y=alt.Y("lower:Q").scale(domain=Y_DOMAIN), y2="upper:Q")
+        y=alt.Y("lower:Q").scale(domain=domain), y2="upper:Q")
     line = base.mark_line(color=COLORS["forecast"], strokeDash=[6, 4], clip=True).encode(
-        y=alt.Y("predicted_temperature:Q").scale(domain=Y_DOMAIN),
+        y=alt.Y("predicted_temperature:Q").scale(domain=domain),
         tooltip=[alt.Tooltip("target_time:T", title="forecast for", format="%d %b %H:%M"),
                  alt.Tooltip("predicted_temperature:Q", format=".1f", title="forecast"),
                  alt.Tooltip("lower:Q", format=".1f"), alt.Tooltip("upper:Q", format=".1f")])
@@ -355,20 +358,23 @@ def window_shading(df):
 
 
 def show_curve(df, forecast):
+    """Draw the main chart. Returns the temperature axis it used, for the caption."""
+    # From the readings only: the bands are clipped, so a wide forecast interval cannot stretch the axis.
+    domain = list(y_domain(df["temperature"], zoom_axis))
     base = alt.Chart(df).encode(x=alt.X("event_time:T", title="Event time"))
     layers = window_shading(df) if show_windows else []   # first layer = drawn behind the lines
     if show_band:
         layers.append(base.mark_area(color=COLORS["rolling_avg"], opacity=0.15, clip=True).encode(
-            y=alt.Y("band_low:Q").scale(domain=Y_DOMAIN), y2="band_high:Q"))
+            y=alt.Y("band_low:Q").scale(domain=domain), y2="band_high:Q"))
     # Two lines from one data set: fold the two columns into (series, value) pairs
     # so Altair draws one coloured line per series, with a legend.
     layers.append(base.transform_fold(["temperature", "rolling_avg"], as_=["series", "value"]).mark_line().encode(
-        y=alt.Y("value:Q", title="Temperature").scale(domain=Y_DOMAIN),
+        y=alt.Y("value:Q", title="Temperature").scale(domain=domain),
         color=alt.Color("series:N", title=None).scale(SERIES).legend(orient="top")))
     layers.append(alt.Chart(df[df["is_anomaly"] == 1]).mark_point(color=COLORS["flag"], filled=True, size=70).encode(
-        x="event_time:T", y=alt.Y("temperature:Q").scale(domain=Y_DOMAIN)))
+        x="event_time:T", y=alt.Y("temperature:Q").scale(domain=domain)))
     if not forecast.empty:
-        layers += forecast_layers(forecast)
+        layers += forecast_layers(forecast, domain)
     # Hover anywhere: the nearest reading gets a vertical rule and a tooltip that
     # also says when it arrived (wall clock), not only when the sensor took it.
     hover = alt.selection_point(fields=["event_time"], nearest=True, on="pointerover", empty=False)
@@ -383,6 +389,14 @@ def show_curve(df, forecast):
     st.altair_chart(alt.layer(*layers).properties(height=380),
                     alt="Temperature and 1-hour rolling average by event time, with a volatility band, red points on "
                         "readings flagged as anomalous, labelled failure windows shaded and the ARIMA forecast")
+    return domain
+
+
+def axis_note(domain):
+    if zoom_axis:
+        return (f"Axis zoomed to {domain[0]}–{domain[1]} to show the changes; turn zoom off in the sidebar for the "
+                f"full {FULL_SCALE[0]}–{FULL_SCALE[1]} scale.")
+    return f"Fixed {FULL_SCALE[0]}–{FULL_SCALE[1]} axis."
 
 
 def history_controls():
@@ -415,21 +429,22 @@ def show_curve_card(live):
                 st.caption("No readings stored at or before this time yet.")
                 return view
             # The tiles above keep updating; this chart only moves when you move the slider.
-            show_curve(view, pd.DataFrame())
+            domain = show_curve(view, pd.DataFrame())
             st.caption(f"Browsing history: {len(view):,} readings from {view['event_time'].min():%d %b %H:%M} "
                        f"to {view['event_time'].max():%d %b %Y %H:%M} (event time), which arrived between "
                        f"{view['stored_at'].min():%H:%M:%S} and {view['stored_at'].max():%H:%M:%S}. "
-                       f"New data keeps arriving: newest reading {live['event_time'].max():%d %b %Y %H:%M}.")
+                       f"New data keeps arriving: newest reading {live['event_time'].max():%d %b %Y %H:%M}. "
+                       + axis_note(domain))
             return view
         forecast = load_forecast()
-        show_curve(live, forecast)
+        domain = show_curve(live, forecast)
         if forecast.empty:
             st.caption(f"Newest {len(live):,} readings. No forecast yet: the forecaster needs 288 readings "
-                       "(24 h of event time) for its first fit.")
+                       "(24 h of event time) for its first fit. " + axis_note(domain))
         else:
             st.caption(f"Newest {len(live):,} readings. Dashed grey: ARIMA(1,1,1) forecast of the next hour, made at "
                        f"event time {forecast['made_at_event_time'].iloc[0]:%d %b %H:%M}; grey band = 95% interval. "
-                       "Green band = rolling average ± 2 standard deviations. Hover for details.")
+                       "Green band = rolling average ± 2 standard deviations. Hover for details. " + axis_note(domain))
         return live
 
 
@@ -505,9 +520,10 @@ def show_model_tab(view):
 
 def show_hourly_band(hourly):
     """Each hour's lowest to highest reading as a band, with the hourly mean as a line."""
+    domain = list(y_domain(list(hourly["min_temperature"]) + list(hourly["max_temperature"]), zoom_axis))
     base = alt.Chart(hourly).encode(x=alt.X("hour_start:T", title="Hour of event time"))
     band = base.mark_area(color=COLORS["temperature"], opacity=0.25).encode(
-        y=alt.Y("min_temperature:Q", title="Temperature").scale(domain=Y_DOMAIN), y2="max_temperature:Q")
+        y=alt.Y("min_temperature:Q", title="Temperature").scale(domain=domain), y2="max_temperature:Q")
     line = base.mark_line(color=COLORS["temperature"], point=True).encode(
         y="avg_temperature:Q",
         tooltip=[alt.Tooltip("hour_start:T", title="hour", format="%d %b %H:00"),
@@ -582,11 +598,12 @@ def show_forecast_check(check):
     cols[2].metric("Points compared", f"{len(check):,}", border=True)
     long = check.rename(columns={"predicted_temperature": "forecast"}).melt(
         id_vars=["target_time"], value_vars=["forecast", "actual"], var_name="series", value_name="value")
+    domain = list(y_domain(long["value"], zoom_axis))
     base = alt.Chart(check).encode(x=alt.X("target_time:T", title="Event time"))
     band = base.mark_area(color=COLORS["forecast"], opacity=0.2, clip=True).encode(
-        y=alt.Y("lower:Q", title="Temperature").scale(domain=Y_DOMAIN), y2="upper:Q")
+        y=alt.Y("lower:Q", title="Temperature").scale(domain=domain), y2="upper:Q")
     lines = alt.Chart(long).mark_line(clip=True).encode(
-        x="target_time:T", y=alt.Y("value:Q").scale(domain=Y_DOMAIN),
+        x="target_time:T", y=alt.Y("value:Q").scale(domain=domain),
         color=alt.Color("series:N", title=None).scale(
             domain=["actual", "forecast"], range=[COLORS["temperature"], COLORS["forecast"]]
         ).legend(orient="top"),
