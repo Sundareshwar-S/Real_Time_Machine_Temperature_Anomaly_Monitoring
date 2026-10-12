@@ -64,7 +64,7 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   `load_windows()` (`@st.cache_data`), sidebar toggle "Show known failure windows" (default on), shading = `mark_rect`
   layer of the windows overlapping the curve, clipped to its range; `show_window_progress()` prints
   "Labelled failure windows with at least one flag: X of Y reached so far" (Y = windows with start <= last_event_time).
-- `dashboard/app.py`: Streamlit page. Sidebar (refresh 1-10 s, curve rows 12-2016 default 288, pause toggle), then one
+- `dashboard/app.py`: Streamlit page. Sidebar (refresh 1-10 s, pause toggle; the curve-rows slider was removed on 2026-10-12, see CURVE_ROWS), then one
   fragment `live_view()` with `run_every=None if paused else refresh_s`: status line, 6 KPI tiles, Altair chart, last 10 flags.
   Query helpers `load_metrics()`, `load_curve(n)`, `load_recent_flags()`, `load_flag_times()` all call `run_query(sql, **params)`
   (`with conn.engine.connect() as db: pd.read_sql(text(sql), db, params=params)`): no cache, connection returned at once.
@@ -419,7 +419,9 @@ A flag outside a labelled window is unlabelled, not proven false.
 - Since 2026-10-12 also: history browser, 5 lazy tabs, final run report (see "Dashboard upgrade decisions").
 - Database access through st.connection (settings from secrets.toml), every query via `run_query()` with no cache
   (st.connection's own `query()` caches forever by default and leaks pooled connections; see Phase 4/6 decisions).
-- The curve reads only the newest 288 rows (ORDER BY id DESC LIMIT n, then sorted ascending in pandas).
+- The curve reads only the newest `CURVE_ROWS` = 144 rows, 12 h of event time (ORDER BY id DESC LIMIT n, then sorted
+  ascending in pandas). It was a 12-2016 slider (default 288) until 2026-10-12; the user asked for an automatic
+  length because a long curve (e.g. 504 rows) squeezed the changes together.
 - Temperature y-axis: zoomed by default (`chart_scale.y_domain`: readings ± 2, rounded out to tens, at least 20 wide,
   inside 0-115), fixed 0-115 with the sidebar zoom toggle off. "Waiting for data" when tables are empty. A "No new data for N s" warning when updated_at is more than 10 s old.
 - If the dashboard looks frozen, check in this order: is the producer running, is the processor's batch log moving, is any query cached.

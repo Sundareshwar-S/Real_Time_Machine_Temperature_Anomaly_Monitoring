@@ -144,7 +144,7 @@ python -m src.producer --resume                          # continue after Ctrl+C
 ### What the dashboard shows
 - **Top:** machine state badge (Normal / Watch / Anomaly from the newest reading's score), the Live /
   "No new data" / "Replay complete" status line, replay progress (row X of 20,695), and 10 KPI tiles.
-- **Temperature curve:** temperature, rolling average, volatility band (± 2 rolling std), red flags,
+- **Temperature curve:** the newest 144 readings (12 h of machine time, chosen automatically): temperature, rolling average, volatility band (± 2 rolling std), red flags,
   failure windows and the ARIMA forecast. Hover any point to see its event time and when it arrived.
   Switch **Follow live → Browse history** to scroll back: the slider and the Earlier / Later buttons
   move through every stored reading while new data keeps arriving (the tiles stay live, the browsed
