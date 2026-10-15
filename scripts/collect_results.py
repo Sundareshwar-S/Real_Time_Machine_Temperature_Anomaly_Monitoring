@@ -116,7 +116,7 @@ or `report/evaluation.csv` by that script.
 | Peak | {peak.temperature:.2f} | {peak.event_time:%Y-%m-%d %H:%M} |
 | Minimum | {low.temperature:.2f} | {low.event_time:%Y-%m-%d %H:%M} |
 
-## Anomalies (IsolationForest, 4 features, contamination 0.01)
+## Anomalies (IsolationForest, 6 features, contamination 0.01)
 - Readings flagged: **{int(m.anomalies_flagged)}** of {len(readings):,} ({score['flagged_pct']:.2f}%); flags in `readings`: {score['flags']}.
 - Labelled failure windows with at least one flag: **{score['windows_hit']} of {len(windows)}**.
 - Flags inside labelled windows: {score['inside']}; outside: {score['outside']} (unlabelled, not proven false).

@@ -1,0 +1,11 @@
+model,random_state,stream_flagged_pct,windows_hit,flags,flags_inside,flags_outside,delay_w1_min,delay_w2_min,delay_w3_min,delay_w4_min
+IF 6 features c=0.01,0,1.97,4 of 4,408,139,269,965,150,210,65
+IF 6 features c=0.01,1,2.33,4 of 4,481,155,326,960,150,205,65
+IF 6 features c=0.01,2,1.71,4 of 4,354,113,241,965,165,210,2695
+IF 6 features c=0.01,3,1.41,4 of 4,291,102,189,970,165,210,2700
+IF 6 features c=0.01,42,2.06,4 of 4,426,161,265,965,145,210,0
+IF 4 features c=0.01 (previous model),0,1.25,4 of 4,259,80,179,975,165,210,2695
+IF 4 features c=0.01 (previous model),1,1.3,4 of 4,268,83,185,970,165,210,2695
+IF 4 features c=0.01 (previous model),2,1.25,4 of 4,258,81,177,975,165,210,2695
+IF 4 features c=0.01 (previous model),3,1.33,4 of 4,275,83,192,975,165,210,2695
+IF 4 features c=0.01 (previous model),42,1.37,4 of 4,284,83,201,975,165,210,2695

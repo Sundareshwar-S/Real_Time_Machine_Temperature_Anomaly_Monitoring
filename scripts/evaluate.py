@@ -3,13 +3,18 @@
 Offline analysis, no Kafka or MySQL: the stream rows (2000 onward) are replayed
 in memory exactly as the pipeline sees them (repeated timestamps dropped, then
 RollingFeatures from a cold start), and several detectors are compared:
-  - IsolationForest on the 4 features at contamination 0.005, 0.01, 0.02, 0.05
+  - IsolationForest on the 6 features at contamination 0.005, 0.01, 0.02, 0.05
     (0.01 is the model the pipeline uses)
+  - the previous model: IsolationForest on the 4 one-hour features only, 0.01
   - IsolationForest on raw temperature only (the course guide's approach)
   - a no-ML baseline: rolling z-score against the previous 288 readings (24 h)
 A flag outside a labelled window is unlabelled, not proven false.
+The two 24-hour features were added after this table showed that the 4-feature
+model caught the slow decline in window 4 about 45 hours late, so they were
+chosen with the labels in view. The seed check refits both models with five
+random_state values to show how much the result depends on the random trees.
 
-    python scripts/evaluate.py     writes report/evaluation.csv and two figures
+    python scripts/evaluate.py     writes report/evaluation.csv, report/seed_check.csv and two figures
 """
 import csv
 import json
@@ -26,10 +31,13 @@ import pandas as pd  # noqa: E402
 from sklearn.ensemble import IsolationForest  # noqa: E402
 
 from src import config, train_model  # noqa: E402
-from src.features import WINDOW_SIZE, RollingFeatures, model_row  # noqa: E402
+from src.features import FEATURE_NAMES, WINDOW_SIZE, RollingFeatures, model_row  # noqa: E402
 
 REPORT = config.ROOT / "report"
 ZSCORE_HISTORY = 288   # previous readings the z-score compares against (24 h)
+# The previous model's columns: the 1-hour features only, without drift and daily_std.
+PREVIOUS_FEATURES = ["temperature", "deviation", "rolling_std", "delta"]
+SEEDS = (0, 1, 2, 3, 42)   # random_state values for the seed check (42 is the pipeline's)
 
 
 def load_stream():
@@ -66,10 +74,16 @@ def stream_model_rows(temperatures):
     return [model_row(features.update(t)) for t in temperatures]
 
 
-def isolation_forest_flags(train_rows, stream_rows, contamination):
+def only_columns(rows, names):
+    """Keep only the named columns (in FEATURE_NAMES order) of model rows, e.g. the previous model's four."""
+    keep = [FEATURE_NAMES.index(name) for name in names]
+    return [[row[i] for i in keep] for row in rows]
+
+
+def isolation_forest_flags(train_rows, stream_rows, contamination, random_state=train_model.RANDOM_STATE):
     """Fit an IsolationForest with the pipeline's settings except contamination, and flag the stream."""
     model = IsolationForest(n_estimators=train_model.N_ESTIMATORS, contamination=contamination,
-                            random_state=train_model.RANDOM_STATE)
+                            random_state=random_state)
     model.fit(train_rows)
     flags = [1 if p == -1 else 0 for p in model.predict(stream_rows)]
     return without_warm_up(flags)
@@ -131,7 +145,7 @@ def save_figures(times, temperatures, chosen_flags, windows, table):
         x="event_time:T", y="temperature:Q")
     (rects + line + points).properties(
         width=1100, height=320,
-        title="Stream (rows 2000+), labelled failure windows shaded, red = flagged by IsolationForest (4 features, 0.01)",
+        title="Stream (rows 2000+), labelled failure windows shaded, red = flagged by IsolationForest (6 features, 0.01)",
     ).save(REPORT / "stream_flags.png", scale_factor=2)
 
     base = alt.Chart(table).encode(y=alt.Y("model:N", sort=None, title=None),
@@ -153,9 +167,14 @@ def main():
     raw_train = [[temp] for _, temp in training[WINDOW_SIZE:]]                          # same rows, raw value
     stream_rows = stream_model_rows(temperatures)
 
+    previous_train = only_columns(train_rows, PREVIOUS_FEATURES)
+    previous_stream = only_columns(stream_rows, PREVIOUS_FEATURES)
+
     detectors = []
     for c in (0.005, 0.01, 0.02, 0.05):
-        detectors.append((f"IF 4 features c={c}", "rows 12-1999", isolation_forest_flags(train_rows, stream_rows, c)))
+        detectors.append((f"IF 6 features c={c}", "rows 12-1999", isolation_forest_flags(train_rows, stream_rows, c)))
+    detectors.append(("IF 4 features c=0.01 (previous model)", "rows 12-1999",
+                      isolation_forest_flags(previous_train, previous_stream, 0.01)))
     detectors.append(("IF raw temperature c=0.01", "rows 12-1999",
                       isolation_forest_flags(raw_train, [[t] for t in temperatures], 0.01)))
     for cutoff in (3, 4):
@@ -165,8 +184,7 @@ def main():
     saved = joblib.load(config.MODEL_PATH)["model"]
     pipeline_flags = without_warm_up([1 if p == -1 else 0 for p in saved.predict(stream_rows)])
     chosen = detectors[1][2]
-    print(f"IF 4 features c=0.01 equals the saved pipeline model: {chosen == pipeline_flags} "
-          f"({sum(chosen)} flags; the Phase 5 full replay stored 284)")
+    print(f"IF 6 features c=0.01 equals the saved pipeline model: {chosen == pipeline_flags} ({sum(chosen)} flags)")
 
     rows = []
     for name, trained_on, flags in detectors:
@@ -189,8 +207,25 @@ def main():
     print("\nWindows: " + "; ".join(f"w{i} {s:%Y-%m-%d %H:%M} to {e:%Y-%m-%d %H:%M}"
                                       for i, (s, e) in enumerate(windows, start=1)))
 
+    # Seed check: the same two models with other random trees. Only random_state changes.
+    seeds = []
+    for name, train, stream in (("IF 6 features c=0.01", train_rows, stream_rows),
+                                ("IF 4 features c=0.01 (previous model)", previous_train, previous_stream)):
+        for seed in SEEDS:
+            score = score_against_windows(times, isolation_forest_flags(train, stream, 0.01, seed), windows)
+            seeds.append({"model": name, "random_state": seed, "stream_flagged_pct": round(score["flagged_pct"], 2),
+                          "windows_hit": f"{score['windows_hit']} of {len(windows)}", "flags": score["flags"],
+                          "flags_inside": score["inside"], "flags_outside": score["outside"],
+                          **{f"delay_w{i}_min": d for i, d in enumerate(score["delays_min"], start=1)}})
+    seed_table = pd.DataFrame(seeds)
+    for column in [c for c in seed_table.columns if c.startswith("delay_")]:
+        seed_table[column] = seed_table[column].astype("Int64")
+    seed_table.to_csv(REPORT / "seed_check.csv", index=False)
+    print("\nSeed check (only random_state changes):\n")
+    print(markdown_table(seed_table))
+
     save_figures(times, temperatures, chosen, windows, table)
-    print("Saved report/evaluation.csv, report/stream_flags.png, report/flags_outside_windows.png")
+    print("Saved report/evaluation.csv, report/seed_check.csv, report/stream_flags.png, report/flags_outside_windows.png")
 
 
 if __name__ == "__main__":
