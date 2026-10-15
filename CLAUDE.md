@@ -14,7 +14,10 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   upgrade decisions"), zoomed temperature axis (`dashboard/chart_scale.py`), anomaly-score strip under the curve.
 - **QA pass and 6-feature model** (2026-10-15, user request: "test everything, fix bugs and low accuracy, check the
   graphs"). Two bugs fixed, the model got two 24-hour features (user approved), every stored value and every chart
-  verified against independent recomputes. See "QA pass decisions (2026-10-15)". 52 tests.
+  verified against independent recomputes. See "QA pass decisions (2026-10-15)".
+- **History scrubber and "Clear data and start again"** (2026-10-15, user request): the browse slider is now a small
+  components-v2 scrubber that updates the chart while it is dragged and marks every flagged reading in red; a sidebar
+  button runs the reset from the dashboard. See "Scrubber and clear-data decisions (2026-10-15)". 64 tests.
 - **What is left is the student's own work:** screenshots into `report/screenshots/` (live dashboard, console consumer,
   consumer groups, MySQL counts), the "What I learned" paragraph and name/course details in `report/report_draft.md`
   (marked TODO), rewriting the draft in their own words, and a screen recording of the demo (DEMO.md).
@@ -59,7 +62,10 @@ and a Streamlit dashboard redraws itself every 2 seconds.
 - `src/processor.py` also has `hourly_rows(rows)` (one dict per event-time hour of the batch); `main()` passes it to
   `db.write_batch(conn, readings, metrics, hourly)`, which merges it into hourly_stats in the same transaction.
 - `src/db.py` also has `UPSERT_HOURLY`, `UPSERT_FORECAST`, `write_forecasts(conn, rows)`; `empty_tables` empties all 4 tables.
-- `scripts/reset_demo.py` deletes both consumer groups (`scoring`, `forecast`).
+- `scripts/reset_demo.py` deletes both consumer groups (`scoring`, `forecast`). Since 2026-10-15: `reset_all(admin, conn)`
+  returns the printed lines or raises `ResetError`; `check_idle()` runs first (no group members via
+  `admin.describe_groups`, metrics_current.updated_at older than `FRESH_S = 10`, `topic_growing()` = end offset unchanged
+  over 1.5 s), so a refusal deletes nothing. The dashboard's button calls the same `reset_all()`.
 - `dashboard/app.py` (Phase 7): `load_forecast()` (newest made_at_event_time, 12 rows), `load_hourly()` (last 48 h),
   `forecast_layers()` (grey dashed line + 95% band, `clip=True`) on the curve, `show_hourly()` red bars per hour.
 - `scripts/evaluate.py`: `load_stream()` (csv + float(), like the producer), `load_windows()`, `accept_in_order()` (the
@@ -88,7 +94,9 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   first fit at reading 288 then every 12, repeats skipped), `tests/test_run_report.py` (5: durations, pauses left out,
   run summary on a 6-row fixture, unreached windows, Markdown), `tests/test_chart_scale.py` (7: zoomed axis rounding,
   40-unit minimum span widened on both sides, cap at 115, zoom off, no readings), `tests/test_model_labels.py` (5:
-  flagged / watch / normal / warm-up with a negative score / missing score). Total: 52 tests.
+  flagged / watch / normal / warm-up with a negative score / missing score), `tests/test_history_scrubber.py` (6: steps,
+  rounding, clamping, flag marks), `tests/test_reset.py` (6: idle reset in order, refuses a running processor /
+  forecaster / producer / fresh data without deleting anything, runs twice). Total: 64 tests.
 - `tests/test_features.py` (9 hand-calculated tests, 4 of them for the 24-hour features), `tests/test_scoring.py` (9 tests:
   train/serve rows identical, warm-up across batches, no warm-up after a full restore, warm-up continues after a restore
   of fewer than 12 rows, a restarted run scores exactly the rows of an uninterrupted one, one call per batch,
@@ -227,9 +235,9 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   Ideas list: `improvement.md`. No new tables, columns, libraries or processor changes.
 - Layout inside the one fragment: state badge + status + `st.progress` replay position; 10 KPI tiles (2 sparklines);
   curve card with `st.segmented_control` Follow live / Browse history; 5 lazy tabs; last 10 flags; page clock.
-- Browse history: a datetime `st.slider` (key `history_end`) with FIXED bounds = first/last stream timestamp of the
-  CSV (`stream_bounds()`, cached). Streamlit 1.65 resets a slider whose min/max change even with a key, so the
-  bounds must not grow with the data. Query `WHERE event_time <= :until ORDER BY event_time DESC LIMIT :n`.
+- Browse history: since 2026-10-15 the `history_scrubber` component (key `history_scrub`, see "Scrubber and clear-data
+  decisions"); `st.session_state.history_end` (a plain session value, no longer a widget key) holds the chosen end time.
+  Bounds stay FIXED = first/last stream timestamp of the CSV (`stream_bounds()`, cached). Query `WHERE event_time <= :until ORDER BY event_time DESC LIMIT :n`.
   Earlier/Later buttons shift by half the curve via callbacks; entering browse mode starts at the newest reading.
   Verified live: the browsed range stays still across reruns while new readings arrive.
 - Tabs: `st.tabs(TABS, key="tab", on_change="rerun", bind="query-params")`; each body runs only if `tab.open`, so
@@ -296,6 +304,33 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - Lessons: a wait loop on `kafka-consumer-groups.sh --describe` must check both groups explicitly: during a rebalance the
   "scoring" row is missing and a loose check exits early. Headless Chrome returned a blank page twice this session
   (render chart specs with vl-convert instead, or AppTest for content).
+
+## Scrubber and clear-data decisions (2026-10-15; keep them)
+- User request: the history chart must follow the slider while it is dragged, red marks where anomalies are, and a
+  button to clear the data and run the project again (keeping the dataset).
+- Reproduced first in real Chrome (DevTools protocol over the installed `websockets` package, real mouse events):
+  `st.slider` only reports on release; while held, its label moved but the chart stayed. `st.slider` has no
+  live-drag option in 1.65 (`streamlit docs st.slider`), so `dashboard/history_scrubber.py` is an inline
+  `st.components.v2.component` (html/css/js strings, no v1 APIs, no new library): a native `<input type=range>` in
+  5-minute steps over a lane with the stored stretch shaded and one 2 px red mark per flagged step. JS sends
+  `setStateValue("end", step)` at most every 120 ms while dragging plus once on release; the `on_end_change`
+  callback `scrubbed()` sets `history_end`. The JS only re-applies Python's value when the thumb is not held, so
+  the 2 s auto-refresh never moves it. Times go to JS as naive-as-UTC ms and are shown with getUTC*.
+- Verified in Chrome: chart follows each 25 px move while held (2.5 s holds, across auto-refreshes); 125 marks for
+  125 flags, each within 1 px of the thumb centre for that reading; fast 60-move drag ends where the label says;
+  Earlier / Later / Back to live work; AppTest: all tabs and browse positions = SQL.
+- AppTest gotcha: the component registry belongs to the Streamlit Runtime; AppTest makes a new runtime per test, so
+  pop `dashboard.history_scrubber` from `sys.modules` before each AppTest or it raises "Component ... is not
+  registered". `streamlit run` has one runtime, so module-level registration (the documented pattern) is right.
+- Clear button (sidebar, `@st.dialog` confirmation, user chose "refuse while running"): calls
+  `reset_demo.reset_all()`, then `st.cache_data.clear()`, sets `curve_mode = "Follow live"` and `celebrated = False`,
+  pops `history_end`, `st.rerun()`, then a toast. Never delete a widget or component key (`curve_mode`,
+  `history_scrub`): the next run calls that widget's callback before the key exists again (AttributeError, hit twice).
+- Latent CLI bug fixed with it: the old reset recreated the topic before finding out that a group could not be
+  deleted, leaving a half-reset system. Verified live: processor running -> refused (3,000 rows kept); producer
+  running alone -> refused ("New messages are still arriving"); all stopped -> 0 rows in all 4 tables, topic offset
+  0, no groups, no .producer_state, sha256 of data/*, db/schema.sql and the model unchanged; a new run on the same
+  open page went from "Waiting for data" to Live with a cold-start processor.
 
 ## Forecaster and hourly-window decisions from Phase 7 (keep them)
 - ARIMA (statsmodels 0.15): `ARIMA(list, order=(1,1,1)).fit()`, `get_forecast(steps=12)`, `.predicted_mean`,
@@ -534,9 +569,10 @@ Real-Time-Machine-Temperature-Anomaly-Monitoring/
 │   ├── app.py                 ✓ layer 6: Streamlit
 │   ├── chart_scale.py         ✓ zoomed temperature axis (tested)
 │   ├── model_labels.py        ✓ Flagged / Watch / Normal label of a reading (tested)
+│   ├── history_scrubber.py    ✓ live-drag history slider with red flag marks (components v2; maths tested)
 │   └── run_report.py          ✓ run summary for the final report (pure pandas, tested)
 ├── scripts/
-│   ├── reset_demo.py          ✓ recreate topic, delete consumer group, empty tables
+│   ├── reset_demo.py          ✓ check nothing runs, then recreate topic, delete groups, empty tables (also the dashboard button)
 │   ├── make_secrets.py        ✓ writes .streamlit/secrets.toml from .env
 │   ├── collect_results.py     ✓ writes report/results.md from the finished replay
 │   └── evaluate.py            ✓ extra: score flags against NAB labels, write the table and figures
@@ -550,6 +586,8 @@ Real-Time-Machine-Temperature-Anomaly-Monitoring/
 │   ├── test_forecaster.py     ✓ 6 tests: forecast rows, ARIMA wrapper, refit cadence
 │   ├── test_chart_scale.py    ✓ 7 tests: zoomed axis
 │   ├── test_model_labels.py   ✓ 5 tests: the watch label rule
+│   ├── test_history_scrubber.py ✓ 6 tests: scrubber time <-> step maths
+│   ├── test_reset.py          ✓ 6 tests: reset refuses while anything runs
 │   └── test_run_report.py     ✓ 5 tests: run report durations, pauses, summary numbers
 └── report/
     ├── screenshots/           ✓ (empty)
