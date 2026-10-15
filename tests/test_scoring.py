@@ -153,3 +153,26 @@ def test_warm_up_continues_after_a_restore_with_fewer_than_12_readings(monkeypat
                                    FakeModel(prediction=-1))[0]
 
     assert [row[9] for row in rows] == [0] * 7 + [1] * 8
+
+
+def test_a_restart_scores_exactly_the_rows_an_uninterrupted_run_scores(monkeypatch):
+    # 400 readings: one run scores them all; another stops after 350 and restarts.
+    # The restarted run must rebuild both windows (1 hour and 24 hours) from MySQL,
+    # so every model row after the restart is identical, value for value.
+    readings = first_training_readings(400)
+    continuous = FakeModel(prediction=1)
+    processor.process_batch(make_messages(readings), processor.RollingFeatures(), processor.new_state(), continuous)
+
+    stored = [{"kafka_offset": i, "event_time": processor.datetime.strptime(t, "%Y-%m-%d %H:%M:%S"),
+               "temperature": temp} for i, (t, temp) in enumerate(readings[:350])]
+    metrics = {"peak_temperature": 80.0, "min_temperature": 60.0, "events_processed": 350,
+               "anomalies_flagged": 0, "late_events_dropped": 0}
+    # Like the real query: the newest n stored readings, oldest first.
+    monkeypatch.setattr(db, "fetch_latest_readings", lambda conn, n: stored[-n:])
+    monkeypatch.setattr(db, "fetch_metrics", lambda conn: metrics)
+    features = processor.RollingFeatures()
+    state = processor.restore_state(None, features)
+    restarted = FakeModel(prediction=1)
+    processor.process_batch(make_messages(readings[350:], first_offset=350), features, state, restarted)
+
+    assert restarted.predict_calls[0] == continuous.predict_calls[0][350:]

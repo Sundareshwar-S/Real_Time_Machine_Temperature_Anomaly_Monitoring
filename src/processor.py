@@ -1,6 +1,6 @@
 """Layer 3: the stream processor.
 
-Reads events from Kafka, keeps a 1-hour sliding window in memory, and writes
+Reads events from Kafka, keeps two sliding windows in memory (1 hour and 24 hours), and writes
 every accepted reading plus the current KPIs to MySQL. This is where the state
 of the stream lives: the window, the running peak and minimum, and the counters.
 
@@ -25,7 +25,7 @@ from kafka import DefaultSerializer, JsonSerializer, KafkaConsumer
 from sklearn.exceptions import InconsistentVersionWarning
 
 from src import checks, config, db
-from src.features import FEATURE_NAMES, WINDOW_SIZE, RollingFeatures, model_row
+from src.features import FEATURE_NAMES, LONG_WINDOW, WINDOW_SIZE, RollingFeatures, model_row
 
 # How long to keep retrying Kafka and MySQL at startup before giving up.
 STARTUP_WAIT_S = 60
@@ -107,14 +107,15 @@ def restore_state(conn, features):
     Returns the state dict the loop keeps between batches.
     """
     state = new_state()
-    latest = db.fetch_latest_readings(conn, 12)
+    latest = db.fetch_latest_readings(conn, LONG_WINDOW)
     metrics = db.fetch_metrics(conn)
     if not latest or metrics is None:
         print("Cold start: no stored readings yet.")
         return state
 
-    # Refill the window from the newest 12 stored readings, so rolling_avg
-    # continues smoothly instead of starting again from one reading.
+    # Refill both windows from the newest 288 stored readings (the 1-hour
+    # window keeps the last 12), so the features continue exactly as if the
+    # processor had never stopped.
     features.restore([row["temperature"] for row in latest])
     state["last_event_time"] = latest[-1]["event_time"]
     state["last_offset"] = latest[-1]["kafka_offset"]
@@ -128,7 +129,7 @@ def restore_state(conn, features):
     # for the readings still missing.
     state["warmup_left"] = max(0, WINDOW_SIZE - len(latest))
     print(
-        f"Restored: window of {len(features.window)} readings, last event_time {state['last_event_time']}, "
+        f"Restored: windows of {len(features.window)} and {len(features.long_window)} readings, last event_time {state['last_event_time']}, "
         f"last offset {state['last_offset']}, {state['events_processed']} processed, "
         f"{state['anomalies_flagged']} flagged, {state['late_events_dropped']} late dropped"
     )

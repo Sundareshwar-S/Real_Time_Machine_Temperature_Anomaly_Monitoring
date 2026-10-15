@@ -321,7 +321,8 @@ def show_kpis(m, live):
     row[1].metric("Anomalies flagged", f"{int(m['anomalies_flagged']):,}", **tile,
                   help="Readings the IsolationForest flagged.")
     row[2].metric("Anomaly rate", f"{rate:.2f}%", **tile,
-                  help="Flagged readings as a share of readings processed. The model was fitted to flag about 1%.")
+                  help="Flagged readings as a share of readings processed. The model flags about 1% of its training "
+                       "week; the stream has more unusual stretches (2.06% on a full replay).")
     row[3].metric("Late events dropped", f"{int(m['late_events_dropped']):,}", **tile,
                   help="Readings whose event time was not newer than the last accepted one (12 in a full "
                        "replay: the clock steps back on 7 Jan 2014).")
@@ -411,8 +412,9 @@ def show_score_strip(df, x_domain):
     """The model's anomaly score under the curve, on the same time axis.
 
     Below 0 the reading is flagged; the orange band (0 to WATCH_SCORE) is close
-    to the cut-off. A slow drift moves the temperature but leaves the score
-    high; a sudden jump or spike pushes it down.
+    to the cut-off. A sudden jump or spike pushes it down, and so does a
+    reading far from the last 24 hours' average; a small slow drift lowers it
+    only a little.
     """
     base = alt.Chart(df).encode(x=alt.X("event_time:T", title="Event time").scale(domain=x_domain))
     watch = alt.Chart(pd.DataFrame({"low": [0.0], "high": [WATCH_SCORE]})).mark_rect(
@@ -430,8 +432,8 @@ def show_score_strip(df, x_domain):
 
 
 MODEL_NOTE = ("Red = flagged (anomaly score below 0), orange = watch (score 0 to "
-              f"{WATCH_SCORE}). The model flags sudden jumps and spikes; a slow drift moves the temperature "
-              "but not the score. ")
+              f"{WATCH_SCORE}). The model flags sudden jumps and spikes, and readings far from the last 24 hours' "
+              "average; a small slow drift lowers the score without crossing 0. ")
 
 
 def axis_note(domain):
@@ -511,7 +513,7 @@ def show_score_histogram(df):
 
 
 def show_feature_scatter(df):
-    """Two of the four model features against each other: flagged readings sit at the edges."""
+    """Two of the six model features against each other: flagged readings sit at the edges."""
     points = alt.Chart(df).mark_circle(size=40, opacity=0.7).encode(
         x=alt.X("deviation:Q", title="Deviation from 1-hour mean"),
         y=alt.Y("delta:Q", title="Change since previous reading"),
@@ -534,9 +536,11 @@ def show_feature(df, column, title, mark="line"):
 
 
 def show_model_tab(view):
-    st.caption("The IsolationForest scores four features per reading: temperature, deviation from the 1-hour mean, "
-               "1-hour standard deviation and change since the previous reading. A score below 0 is flagged; the score "
-               "over time is drawn under the temperature curve.")
+    st.caption("The IsolationForest scores six features per reading: temperature, deviation from the 1-hour mean, "
+               "1-hour standard deviation, change since the previous reading, and two 24-hour features (deviation "
+               "from the 24-hour mean and 24-hour standard deviation) that catch slow drifts. The charts below show "
+               "the four stored 1-hour features. A score below 0 is flagged; the score over time is drawn under the "
+               "temperature curve.")
     left, right = st.columns(2)
     with left:
         show_score_histogram(view)
