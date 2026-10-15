@@ -123,8 +123,10 @@ def restore_state(conn, features):
     state["events_processed"] = metrics["events_processed"]
     state["anomalies_flagged"] = metrics["anomalies_flagged"]
     state["late_events_dropped"] = metrics["late_events_dropped"]
-    # The window came back full, so there is nothing left to warm up.
-    state["warmup_left"] = 0
+    # Normally the window comes back full and there is nothing left to warm up.
+    # If the last run stopped after fewer than 12 readings, the warm-up goes on
+    # for the readings still missing.
+    state["warmup_left"] = max(0, WINDOW_SIZE - len(latest))
     print(
         f"Restored: window of {len(features.window)} readings, last event_time {state['last_event_time']}, "
         f"last offset {state['last_offset']}, {state['events_processed']} processed, "

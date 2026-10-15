@@ -134,3 +134,22 @@ def test_model_saved_by_another_scikit_learn_version_is_refused(monkeypatch, tmp
     with pytest.raises(SystemExit) as stop:
         processor.load_model()
     assert "0.0.1" in str(stop.value)
+
+
+def test_warm_up_continues_after_a_restore_with_fewer_than_12_readings(monkeypatch):
+    # The processor stopped after 5 readings, so the restored window holds only 5.
+    # The warm-up must go on for the 7 readings still missing, not end at once.
+    readings = first_training_readings(20)
+    stored = [{"kafka_offset": i, "event_time": processor.datetime.strptime(t, "%Y-%m-%d %H:%M:%S"),
+               "temperature": temp} for i, (t, temp) in enumerate(readings[:5])]
+    metrics = {"peak_temperature": 80.0, "min_temperature": 60.0, "events_processed": 5,
+               "anomalies_flagged": 0, "late_events_dropped": 0}
+    monkeypatch.setattr(db, "fetch_latest_readings", lambda conn, n: stored)
+    monkeypatch.setattr(db, "fetch_metrics", lambda conn: metrics)
+
+    features = processor.RollingFeatures()
+    state = processor.restore_state(None, features)
+    rows = processor.process_batch(make_messages(readings[5:], first_offset=5), features, state,
+                                   FakeModel(prediction=-1))[0]
+
+    assert [row[9] for row in rows] == [0] * 7 + [1] * 8
