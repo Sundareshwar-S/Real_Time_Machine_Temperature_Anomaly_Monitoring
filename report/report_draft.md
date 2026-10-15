@@ -239,10 +239,18 @@ drifts. `python scripts/evaluate.py` compares the options on the 20,683 stream r
 - **Why the two 24-hour features were added.** The first model used only the four 1-hour features. They describe
   sudden change, so a slow drift was caught late: window 4, the catastrophic failure, is a slow decline, and its first
   flag came 2,695 minutes (about 45 hours) after the window opened, at the fast recovery near its end. With the
-  24-hour features the decline is flagged at 14:55 on 7 Feb, the minute the window opens, and the decline that starts
-  window 2 is flagged at its first reading (15 Dec 20:15). Flags inside the windows rise from 83 to 161, flags outside
-  from 201 to 265, and the share of the stream flagged from 1.37% to 2.06% (the model still flags 1.01% of its own
-  training week).
+  24-hour features a first reading is flagged at 14:55 on 7 Feb, the minute the window opens, and the decline that
+  starts window 2 is flagged at its first reading (15 Dec 20:15). Flags inside the windows rise from 83 to 161, flags
+  outside from 201 to 265, and the share of the stream flagged from 1.37% to 2.06% (the model still flags 1.01% of its
+  own training week).
+- **But the window-4 catch is weak.** During the slow decline of window 4 the new score sits right at the cut-off
+  (−0.026 to +0.051 in the 12 hours after 18:45 on 7 Feb), so the early flags are single readings scattered along the
+  decline (scores −0.001 to −0.024), not a clear signal. The model flags in 144 separate runs over the stream against
+  51 for the first model. Counting a reading only when at least 3 of the last 6 are flagged (the debounce monitoring
+  tools use, and in the spirit of Numenta's advice to threshold a short moving average of the score rather than each
+  raw score [5]), window 4 is first caught 2,705 minutes after it opens, as late as with the first model. What
+  survives the rule: 123 flags inside the windows against 82, and window 2 caught after 155 minutes instead of 1,320.
+  The dashboard therefore draws these sustained alerts as red bands and keeps single flags as small points.
 - **Honest caveats.** (1) The 24-hour features were chosen after seeing that the first model missed window 4, so the
   labels influenced the design; the evaluation is not fully blind. (2) The result depends on the random trees:
   `report/seed_check.csv` refits both models with random_state 0, 1, 2, 3 and 42. The 6-feature model catches window 4
@@ -333,9 +341,9 @@ Beyond the minimum, the project measures its detector against real failure label
 stream flagged, the catastrophic failure's slow decline caught as it starts), shows why the guide's raw-value approach fails on this data, handles repeated timestamps as late
 events, survives restarts without losing or duplicating readings, and runs a second, independent consumer group.
 
-**Limits.** One sensor; a replayed, not live, source; the 24-hour features were chosen with the labels in view and
-their early catch of window 4 depends on the random seed (3 of 5); a moderate slow drift (22-23 Dec) is still not
-flagged; flags outside the labelled windows cannot be confirmed or refuted; ARIMA cannot forecast a failure.
+**Limits.** One sensor; a replayed, not live, source; the 24-hour features were chosen with the labels in view, and
+their early catch of window 4 is made of single near-threshold flags (as a sustained alert it is still about 45 hours
+late); a moderate slow drift (22-23 Dec) is still not flagged; flags outside the labelled windows cannot be confirmed or refuted; ARIMA cannot forecast a failure.
 
 **Next steps.** A blind check of the 24-hour features on other NAB machine series, a longer training period (one
 week holds few slow drifts), more sensors on more partitions, and periodic retraining on recent normal data.
@@ -352,6 +360,8 @@ week holds few slow drifts), more sensors on more partitions, and periodic retra
    on Data Mining (ICDM 2008)*, Pisa, Italy, 2008, pp. 413-422, doi: 10.1109/ICDM.2008.17.
 4. scikit-learn documentation, `sklearn.ensemble.IsolationForest` and outlier detection:
    https://scikit-learn.org/stable/modules/outlier_detection.html
+5. S. Ahmad and S. Purdy, "Real-Time Anomaly Detection for Streaming Analytics," arXiv:1607.02480, 2016
+   (section 3.2: threshold a short moving average of the anomaly score, not each raw score).
 5. Apache Kafka documentation and quickstart (KRaft mode): https://kafka.apache.org/documentation/ and
    https://kafka.apache.org/quickstart ; Docker image `apache/kafka`: https://hub.docker.com/r/apache/kafka
 6. Streamlit documentation, fragments and connecting to MySQL:

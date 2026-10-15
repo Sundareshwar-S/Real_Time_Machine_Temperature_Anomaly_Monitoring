@@ -124,9 +124,13 @@ Leave Docker running, or `docker compose down` (keeps the data).
   instability, distance from the day's average), which stays comparable as the level drifts (see report/evaluation.csv).
 - **Why six features, not four?** With only the four 1-hour features, the slow decline in window 4 (the catastrophic
   failure) was first flagged about 45 hours after the window opened. Adding the deviation from the 24-hour mean and
-  the 24-hour std catches it at the window's start (161 flags inside the windows instead of 83, 265 outside instead
-  of 201). Honest caveats: they were chosen after seeing the labels, and with other random seeds window 4 is caught
-  early in 3 of 5 cases (report/seed_check.csv).
+  the 24-hour std gives more flags inside the windows (161 instead of 83; 123 vs 82 as sustained alerts) and catches
+  the window-2 decline after 155 instead of 1,320 minutes. Honest caveats: they were chosen after seeing the labels,
+  and in window 4 they only produce single flags near the cut-off from the start; as a sustained alert (3 of the last
+  6 flagged, the red band on the dashboard) window 4 is still about 45 hours late (report/evaluation.csv).
+- **Why are some red points small and others in a red band?** A small point is a single flagged reading; a band means
+  at least 3 of the last 6 readings were flagged. In a slow decline the score hovers at the cut-off, so single flags
+  come and go; monitoring tools wait for several flags close together (debounce) before raising an alert.
 - **What is contamination?** The share of training data treated as anomalous; it sets the threshold. 0.01 here.
   Higher catches failures earlier but adds flags outside the labelled windows (0.02: 699 outside vs 265).
 - **Why no ZooKeeper?** Kafka 4 runs in KRaft mode: the broker manages its own metadata, one container is the cluster.

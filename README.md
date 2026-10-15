@@ -148,10 +148,12 @@ python -m src.producer --resume                          # continue after Ctrl+C
   "No new data" / "Replay complete" status line, replay progress (row X of 20,695), and 10 KPI tiles.
 - **Temperature curve:** the newest 144 readings (12 h of machine time, chosen automatically): temperature, rolling average, volatility band (± 2 rolling std), red flags,
   failure windows and the ARIMA forecast. Hover any point to see its event time and when it arrived.
-  Red points are flagged readings (anomaly score below 0), orange points are "watch" readings (score 0 to
-  0.05). Directly under the curve, on the same time axis, the **anomaly score strip** shows what the model
-  thought of every reading: a sudden jump or spike, or a reading far from the last 24 hours' average,
-  pushes it below the dashed line at 0; a small slow drift lowers it only a little.
+  Red points are flagged readings (anomaly score below 0); a **red band** is a *sustained alert*: at least
+  3 of the last 6 readings flagged. Small red points stand alone: in a slow decline the score can sit right
+  at the cut-off, so single flags come and go from one reading to the next, and monitoring tools wait for
+  several close together before alerting. Directly under the curve, on the same time axis, the **anomaly
+  score strip** shows what the model thought of every reading, with "watch" readings in orange (score from 0
+  to the model's own limit, 0.0345 = the 2nd percentile of its training scores, saved in the model file).
   Switch **Follow live → Browse history** to scroll back. The **history scrubber** spans the whole stream
   (9 Dec 2013 to 19 Feb 2014): the lighter band is the part already stored and every **red mark** is a
   flagged reading. Drag it and the chart follows while you drag (no need to let go); the arrow keys move
@@ -190,6 +192,8 @@ pipeline's saved model (426 flags on a full replay).
 | IsolationForest, 6 features, 0.02 | 6.05% | 4 of 4 | 553 / 699 | 0 / 135 / 205 / 0 |
 | IsolationForest, 6 features, 0.05 | 13.50% | 4 of 4 | 1,036 / 1,756 | 0 / 120 / 190 / 0 |
 | IsolationForest, 4 features, 0.01 (the previous model) | 1.37% | 4 of 4 | 83 / 201 | 975 / 165 / 210 / 2,695 |
+| 6 features, 0.01, counted only as a sustained alert (3 of the last 6 flagged) | 1.83% | 4 of 4 | 123 / 256 | 975 / 155 / 235 / 2,705 |
+| 4 features, 0.01, counted only as a sustained alert | 1.41% | 4 of 4 | 82 / 209 | 985 / 1,320 / 235 / 2,705 |
 | IsolationForest, raw temperature, 0.01 (the course guide's approach) | 36.46% | 4 of 4 | 1,259 / 6,282 | 0 / 0 / 1,365 / 25 |
 | Rolling z-score over 288 readings, cut-off 3 (no ML) | 4.65% | 4 of 4 | 118 / 843 | 1,035 / 100 / 0 / 2,700 |
 | Rolling z-score over 288 readings, cut-off 4 (no ML) | 1.47% | 2 of 4 | 63 / 241 | - / 100 / - / 2,700 |
@@ -198,10 +202,15 @@ The six features are the four 1-hour features (temperature, deviation from the 1
 standard deviation, change since the previous reading) plus two 24-hour features (`drift`: temperature
 minus the 24-hour mean, `daily_std`: 24-hour standard deviation). The 24-hour features were added on
 2026-10-15 because the 4-feature model caught the slow decline in window 4 (the catastrophic failure)
-about 45 hours late; they were chosen with the labels in view. `report/seed_check.csv` refits both
-models with random_state 0, 1, 2, 3 and 42: the 6-feature model catches window 4 within 65 minutes for 3
-of the 5 seeds (seeds 2 and 3 are still about 45 hours late) and always has more flags inside the
-windows (102-161 against 80-83).
+about 45 hours late; they were chosen with the labels in view. **Correction (2026-10-15):** the
+6-feature model's "window 4 at 0 minutes" is made of single readings whose score is just below the cut-off
+(−0.001 to −0.024), scattered along the decline; counted as sustained alerts (3 of the last 6 flagged),
+window 4 is still about 45 hours late (2,705 min), as with the 4-feature model. The real gains are more
+flags inside the windows (123 vs 82 as sustained alerts) and window 2 caught at 155 instead of 1,320 min.
+The model also flickers more: 144 separate runs of flags against 51 (`flag_episodes` in evaluation.csv),
+which is why the dashboard draws sustained alerts as bands. `report/seed_check.csv` refits both models with
+random_state 0, 1, 2, 3 and 42: the 6-feature model has single flags at the start of window 4 for 3 of the
+5 seeds and always has more flags inside the windows (102-161 against 80-83).
 
 A flag outside a labelled window is unlabelled, not proven false. The dashboard's sidebar toggle
 "Show known failure windows" shades the same windows behind the live curve, and a line under the tiles
