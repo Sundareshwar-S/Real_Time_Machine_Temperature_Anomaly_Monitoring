@@ -31,12 +31,12 @@ from streamlit.errors import StreamlitAPIException
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dashboard import run_report  # noqa: E402
 from dashboard.chart_scale import FULL_SCALE, y_domain  # noqa: E402
+from dashboard.model_labels import WATCH_SCORE, flag_label  # noqa: E402
 from scripts import evaluate  # noqa: E402
 from src import config  # noqa: E402
 
 STALE_AFTER_S = 10       # older than this, the status line warns that no new data arrives
 RECENT_FLAGS = 10        # rows in the table of flagged readings
-WATCH_SCORE = 0.05       # an anomaly score between 0 and this is close to the model's cut-off: "Watch"
 SPARK_ROWS = 48          # readings in the tile sparklines (4 hours of event time)
 # Readings on the curve: 12 hours of event time. Fewer readings than a full day, so each change is wide
 # enough to see, and at --rate 10 a 2 s refresh moves the curve by 20 of 144 points (about 14%).
@@ -151,9 +151,7 @@ def load_curve(n, until=None):
     df["lag_ms"] = df["lag_ms"].astype(float)   # MySQL returns the division as a DECIMAL
     df["stored_at"] = to_local(df["stored_at"])
     # The model's view of each reading: flagged (score below 0), watch (close to the cut-off) or normal.
-    df["flag"] = "Normal"
-    df.loc[df["anomaly_score"] <= WATCH_SCORE, "flag"] = "Watch"
-    df.loc[df["is_anomaly"] == 1, "flag"] = "Flagged"
+    df["flag"] = [flag_label(score, flagged) for score, flagged in zip(df["anomaly_score"], df["is_anomaly"])]
     df["band_low"] = df["rolling_avg"] - 2 * df["rolling_std"]
     df["band_high"] = df["rolling_avg"] + 2 * df["rolling_std"]
     return df.sort_values("event_time")
@@ -256,9 +254,10 @@ def windows_caught(last_event_time):
 
 def machine_state(newest):
     """Normal / Watch / Anomaly for the newest reading, from the model's own output."""
-    if newest["is_anomaly"] == 1:
+    label = flag_label(newest["anomaly_score"], newest["is_anomaly"])
+    if label == "Flagged":
         return "Anomaly", "red", ":material/error:"
-    if pd.notna(newest["anomaly_score"]) and newest["anomaly_score"] <= WATCH_SCORE:
+    if label == "Watch":
         return "Watch", "orange", ":material/visibility:"
     return "Normal", "green", ":material/check_circle:"
 
@@ -282,7 +281,7 @@ def show_header(m, newest, bounds, complete):
     label, color, icon = machine_state(newest)
     with st.container(horizontal=True, vertical_alignment="center"):
         st.badge(f"Machine state: {label}", icon=icon, color=color,
-                 help=f"Anomaly: the newest reading is flagged. Watch: its anomaly score is at or below "
+                 help=f"Anomaly: the newest reading is flagged. Watch: its anomaly score is between 0 and "
                       f"{WATCH_SCORE} (close to the cut-off at 0). Normal: otherwise.")
         st.caption(f"Newest reading {newest['event_time']:%d %b %Y %H:%M} (event time), "
                    f"anomaly score {newest['anomaly_score']:+.3f}, arrived {newest['stored_at']:%H:%M:%S}")
