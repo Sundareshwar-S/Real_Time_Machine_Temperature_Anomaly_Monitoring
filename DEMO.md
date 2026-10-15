@@ -23,7 +23,7 @@ In T4:
 ```bash
 docker compose up -d --wait            # both containers "Healthy" (about 15 s from stopped, under 1 s if already up)
 docker compose ps                      # broker and mysql: Up ... (healthy)
-python scripts/reset_demo.py           # ends with "Reset complete."
+python scripts/reset_demo.py           # ends with "Reset complete." (or the dashboard's "Clear data and start again" button)
 ls models/anomaly_model.joblib         # if missing: python -m src.train_model
 python scripts/make_secrets.py         # "Wrote .streamlit/secrets.toml ..."
 streamlit run dashboard/app.py --server.address localhost

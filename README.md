@@ -93,7 +93,7 @@ Run it again after any change to the `MYSQL_*` values in `.env`.
 
 ### 9. Run the tests
 ```bash
-pytest                            # expect: 52 passed
+pytest                            # expect: 64 passed
 ```
 
 ## Run the pipeline
@@ -152,9 +152,11 @@ python -m src.producer --resume                          # continue after Ctrl+C
   0.05). Directly under the curve, on the same time axis, the **anomaly score strip** shows what the model
   thought of every reading: a sudden jump or spike, or a reading far from the last 24 hours' average,
   pushes it below the dashed line at 0; a small slow drift lowers it only a little.
-  Switch **Follow live → Browse history** to scroll back: the slider and the Earlier / Later buttons
-  move through every stored reading while new data keeps arriving (the tiles stay live, the browsed
-  chart stays still). **Back to live** returns to the newest readings.
+  Switch **Follow live → Browse history** to scroll back. The **history scrubber** spans the whole stream
+  (9 Dec 2013 to 19 Feb 2014): the lighter band is the part already stored and every **red mark** is a
+  flagged reading. Drag it and the chart follows while you drag (no need to let go); the arrow keys move
+  5 minutes, the Earlier / Later buttons 6 hours. New data keeps arriving meanwhile (the tiles stay live,
+  the browsed chart stays still). **Back to live** returns to the newest readings.
 - **Tabs** (only the open tab queries MySQL; the open tab is kept in the URL, e.g. `?tab=Pipeline`):
   *Model view* (score histogram, deviation vs delta scatter, the three stored 1-hour window features),
   *Hourly view* (min/avg/max per hour, flags per hour, day × hour heatmap of the whole run),
@@ -275,12 +277,18 @@ If the dashboard refreshes but the numbers do not move, check in this order: is 
 is the processor's batch log moving, and does every query in `dashboard/app.py` go through `run_query()`
 (nothing cached).
 
-## Reset the demo (empty start)
-Stop the processor first. Then:
+## Reset the demo (empty start, e.g. to run the replay again)
+Stop the producer, processor and forecaster with Ctrl+C first. Then either press **Clear data and start
+again** in the dashboard's sidebar (it asks for confirmation; the dashboard can stay open), or run:
 ```bash
 python scripts/reset_demo.py      # recreate the topic, delete groups "scoring" and "forecast", empty all 4 tables, remove .producer_state
 ```
-Safe to run twice in a row.
+Both do the same thing (the button also clears the dashboard's cached data). Both first check that
+nothing is running (no consumer in either group, no reading stored in the last 10 s, no new messages
+on the topic) and otherwise stop with one sentence, deleting nothing. They never touch the dataset
+(`data/`), `db/schema.sql`, the trained model or the settings. Safe to run twice in a row.
+Then start again: processor, forecaster, producer (the dashboard switches from "Waiting for data" to
+"Live" by itself).
 
 ## Stop
 Ctrl+C in the producer, forecaster, processor and dashboard terminals, then:

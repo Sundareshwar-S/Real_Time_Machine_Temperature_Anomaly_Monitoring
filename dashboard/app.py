@@ -21,7 +21,10 @@ from pathlib import Path
 
 import altair as alt
 import pandas as pd
+import pymysql
 import streamlit as st
+from kafka import KafkaAdminClient
+from kafka.errors import KafkaError
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from streamlit.errors import StreamlitAPIException
@@ -33,8 +36,8 @@ from dashboard import run_report  # noqa: E402
 from dashboard.chart_scale import FULL_SCALE, y_domain  # noqa: E402
 from dashboard.history_scrubber import from_step, history_scrubber  # noqa: E402
 from dashboard.model_labels import WATCH_SCORE, flag_label  # noqa: E402
-from scripts import evaluate  # noqa: E402
-from src import config  # noqa: E402
+from scripts import evaluate, reset_demo  # noqa: E402
+from src import config, db  # noqa: E402
 
 STALE_AFTER_S = 10       # older than this, the status line warns that no new data arrives
 RECENT_FLAGS = 10        # rows in the table of flagged readings
@@ -76,6 +79,59 @@ with st.sidebar:
 st.session_state.setdefault("curve_mode", "Follow live")
 st.session_state.setdefault("celebrated", False)
 
+
+# ---------------------------------------------------------------- clear data and start again
+
+def clear_all_data():
+    """The same reset as scripts/reset_demo.py: refuses (ResetError) while anything still runs."""
+    admin = KafkaAdminClient(bootstrap_servers=config.KAFKA_BOOTSTRAP_SERVERS, bootstrap_timeout_ms=5000)
+    try:
+        with db.connect() as mysql:
+            return reset_demo.reset_all(admin, mysql)
+    finally:
+        admin.close()
+
+
+@st.dialog("Clear data and start again", icon=":material/restart_alt:")
+def clear_data_dialog():
+    st.markdown("**Deletes:** every message on the Kafka topic, both consumer groups (processor and forecaster), "
+                "all rows in the four MySQL tables, `.producer_state` and the dashboard's cached data.\n\n"
+                "**Keeps:** the dataset in `data/`, the failure labels, `db/schema.sql`, the trained model and "
+                "the settings.")
+    st.caption("Stop the producer, processor and forecaster with Ctrl+C first; the dashboard can stay open. "
+               "If anything is still running, nothing is deleted.")
+    if st.button("Clear data", type="primary", icon=":material/delete:", width="stretch"):
+        try:
+            with st.spinner("Checking that nothing runs, then clearing..."):
+                clear_all_data()
+        except reset_demo.ResetError as error:
+            st.error(str(error), icon=":material/block:")
+            return
+        except (KafkaError, pymysql.err.OperationalError) as error:
+            st.error(f"Cannot reach Kafka or MySQL ({error}). Start them with: docker compose up -d",
+                     icon=":material/error:")
+            return
+        # Forget everything cached or remembered from the old run, then redraw the whole page.
+        # Widget and component keys (curve_mode, history_scrub) are set, never deleted: a deleted
+        # key makes Streamlit run that widget's callback on the next run before the key exists.
+        # The scrubber needs no reset; it takes its position from history_end on every run.
+        st.cache_data.clear()
+        st.session_state.curve_mode = "Follow live"
+        st.session_state.celebrated = False
+        st.session_state.pop("history_end", None)
+        st.session_state.cleared = True
+        st.rerun()
+
+
+with st.sidebar:
+    st.divider()
+    if st.button("Clear data and start again", icon=":material/restart_alt:", width="stretch",
+                 help="Empty Kafka and MySQL so the replay can run again from the start. The dataset is kept."):
+        clear_data_dialog()
+    if st.session_state.pop("cleared", False):
+        # A toast disappears by itself, so it never goes stale once the next run is live.
+        st.toast("Data cleared: Kafka topic, consumer groups, tables, .producer_state and caches. "
+                 "Start the processor and forecaster, then the producer.", icon=":material/check_circle:")
 
 # Database settings come from .streamlit/secrets.toml ([connections.mysql]).
 try:
