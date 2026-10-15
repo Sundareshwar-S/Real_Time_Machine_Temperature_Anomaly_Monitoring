@@ -12,14 +12,17 @@ and a Streamlit dashboard redraws itself every 2 seconds.
 - **Dashboard upgrade** (2026-10-12, user request after Phase 9): history browser, 5 lazy tabs, 10 KPI tiles, final run
   report (`dashboard/run_report.py`), theme in `.streamlit/config.toml`; verified with a full replay (see "Dashboard
   upgrade decisions"), zoomed temperature axis (`dashboard/chart_scale.py`), anomaly-score strip under the curve.
-  41 tests.
+- **QA pass and 6-feature model** (2026-10-15, user request: "test everything, fix bugs and low accuracy, check the
+  graphs"). Two bugs fixed, the model got two 24-hour features (user approved), every stored value and every chart
+  verified against independent recomputes. See "QA pass decisions (2026-10-15)". 52 tests.
 - **What is left is the student's own work:** screenshots into `report/screenshots/` (live dashboard, console consumer,
   consumer groups, MySQL counts), the "What I learned" paragraph and name/course details in `report/report_draft.md`
   (marked TODO), rewriting the draft in their own words, and a screen recording of the demo (DEMO.md).
 - The model is trained (`models/anomaly_model.joblib`, gitignored; retrain with `python -m src.train_model` on a fresh clone).
 - `.streamlit/secrets.toml` is generated (`python scripts/make_secrets.py`, gitignored).
-- Nothing is running and the system is reset (2026-10-12): empty tables, empty topic, no consumer groups, no
-  `.producer_state`. `report/results.md` keeps the Phase 9 numbers; a full replay reproduces them.
+- Nothing is running and the system is reset (2026-10-15): empty tables, empty topic, no consumer groups, no
+  `.producer_state`. `report/results.md` holds the 2026-10-15 clean full replay (6-feature model); a full replay
+  reproduces it. (On 2026-10-15 the tables still held a user replay from 2026-10-13, so "reset" in this file can go stale.)
 - Git repo on branch `main`, remote `origin` on GitHub. Commit messages follow Conventional Commits, see "Git commit scheme" below.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
@@ -28,9 +31,11 @@ and a Streamlit dashboard redraws itself every 2 seconds.
 - `src/config.py`: every setting (see Settings below).
 - `src/db.py`: `connect()`, `init_schema()` (CLI `python -m src.db --init`), `READING_COLUMNS` (tuple order of a readings row),
   `write_batch(conn, readings, metrics)` (one transaction: INSERT IGNORE readings + upsert metrics_current id=1, rollback on error),
-  `fetch_latest_readings(conn, n=12)` (oldest first), `fetch_metrics(conn)` (dict or None), `empty_tables(conn)`.
-- `src/features.py`: `WINDOW_SIZE = 12`, `FEATURE_NAMES = ["temperature", "deviation", "rolling_std", "delta"]` (model column order),
-  `RollingFeatures.update(t)` -> dict with the 4 features + `rolling_avg`; `RollingFeatures.restore(temps)` refills the window (oldest first).
+  `fetch_latest_readings(conn, n=12)` (oldest first; the processor asks for `LONG_WINDOW` = 288), `fetch_metrics(conn)` (dict or None), `empty_tables(conn)`.
+- `src/features.py`: `WINDOW_SIZE = 12`, `LONG_WINDOW = 288`,
+  `FEATURE_NAMES = ["temperature", "deviation", "rolling_std", "delta", "drift", "daily_std"]` (model column order),
+  `RollingFeatures.update(t)` -> dict with the 6 features + `rolling_avg`; `RollingFeatures.restore(temps)` refills both
+  windows (`window` maxlen 12, `long_window` maxlen 288) from up to 288 readings, oldest first.
 - `src/features.py` also has `model_row(f)`: the feature dict -> list in `FEATURE_NAMES` order. Training and serving both use it.
 - `src/train_model.py`: `load_training_rows()` -> (event_time, temperature) for rows 0-1999, `build_training_rows(temps)` ->
   model rows with the 12 warm-up rows dropped; model constants `N_ESTIMATORS`, `CONTAMINATION`, `RANDOM_STATE`.
@@ -43,8 +48,8 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   consumer (`allow_auto_create_topics=False`) -> signal handlers. A MySQL `OperationalError` on write exits with one
   sentence (the batch's offsets are not committed, so a restart re-reads it). `STARTUP_WAIT_S = 60`.
 - `src/processor.py` (functions): `load_model()` (exits with one sentence if the file is missing, the scikit-learn version differs or the
-  feature names differ), `make_consumer()`, `new_state()` (cold-start state, `warmup_left = 12`), `restore_state()` (also restores
-  `anomalies_flagged`, sets `warmup_left = 0`), `process_batch(messages, features, state, model)` (one `predict` + one
+  feature names differ), `make_consumer()`, `new_state()` (cold-start state, `warmup_left = 12`), `restore_state()` (reads the newest 288 rows, also restores
+  `anomalies_flagged`, sets `warmup_left = max(0, 12 - rows restored)`), `process_batch(messages, features, state, model)` (one `predict` + one
   `decision_function` per batch), `main()`.
 - `src/forecaster.py`: consumer group `config.FORECAST_GROUP` ("forecast"), constants `HISTORY=288`, `EVERY=12`,
   `HORIZON=12`, `ORDER=(1,1,1)`, `STEP=5 min`; `new_state()`, `fit_forecast(temps)` -> (mean, lower, upper) or None (input
@@ -82,10 +87,12 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   `tests/test_forecaster.py` (6: 5-min targets, 12 values inside the interval, a raising fit and NaN/inf windows give None,
   first fit at reading 288 then every 12, repeats skipped), `tests/test_run_report.py` (5: durations, pauses left out,
   run summary on a 6-row fixture, unreached windows, Markdown), `tests/test_chart_scale.py` (7: zoomed axis rounding,
-  40-unit minimum span widened on both sides, cap at 115, zoom off, no readings). Total: 41 tests.
-- `tests/test_features.py` (5 hand-calculated tests), `tests/test_scoring.py` (7 tests: train/serve rows identical, warm-up
-  across batches, no warm-up after restore, one call per batch, missing/old model refused; uses a `FakeModel` that records
-  its input) + `pytest.ini` (`pythonpath = .`, so plain `pytest` works).
+  40-unit minimum span widened on both sides, cap at 115, zoom off, no readings), `tests/test_model_labels.py` (5:
+  flagged / watch / normal / warm-up with a negative score / missing score). Total: 52 tests.
+- `tests/test_features.py` (9 hand-calculated tests, 4 of them for the 24-hour features), `tests/test_scoring.py` (9 tests:
+  train/serve rows identical, warm-up across batches, no warm-up after a full restore, warm-up continues after a restore
+  of fewer than 12 rows, a restarted run scores exactly the rows of an uninterrupted one, one call per batch,
+  missing/old model refused; uses a `FakeModel` that records its input) + `pytest.ini` (`pythonpath = .`, so plain `pytest` works).
 - `db/schema.sql`: `readings` and `metrics_current`, applied and verified.
 - `data/anomaly_windows.json`: `{"source": url, "key": nab_key, "windows": [{"start": ..., "end": ...}, ...]}`,
   4 windows, timestamps formatted like `"2013-12-10 06:25:00.000000"`.
@@ -185,6 +192,8 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - README is one ordered path (Setup 1-9, then three terminals). Windows lines are given but were not run on Windows.
 
 ## Evaluation results and decisions from Phase 6 (the user decides on contamination; nothing was tuned)
+- **History: these are the 4-feature model's numbers.** The current 6-feature numbers are in "QA pass decisions
+  (2026-10-15)", "Expected numbers", report/evaluation.csv and report/results.md.
 - Method: stream rows 2000+, 12 repeated timestamps dropped (20,683 scored), RollingFeatures from a cold start, first 12
   never flagged; every IsolationForest uses n_estimators=200, random_state=42 and training rows 12-1999 (raw-temperature
   model: the same rows' temperatures). z-score: previous 288 accepted readings, sample std, |z| > cut-off, first 288 not
@@ -260,6 +269,34 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   background task) skips the final save, so `--resume` re-sends up to 49 readings. The processor drops them as late
   (seen: 25 late, 0 duplicate offsets or seqs). Stop the producer with Ctrl+C before a --resume demo.
 
+## QA pass decisions (2026-10-15; keep them)
+- Asked for by the user: test the whole project as a test developer, fix bugs and low accuracy, check the graphs.
+- **Bug 1 (fixed, `03ffe39`):** `restore_state()` always ended the warm-up; after a stop with fewer than 12 stored
+  readings a restart could flag readings scored on a filling window. Now `warmup_left = max(0, 12 - rows restored)`.
+  (Live drill: on this data readings 1-12 would not be flagged anyway, so only the unit test exposes the bug.)
+- **Bug 2 (fixed, `2df8f4e`):** the dashboard called every unflagged score <= 0.05 "Watch", so warm-up readings with a
+  negative score were orange. `dashboard/model_labels.flag_label()` (Watch = 0 <= score <= 0.05) is now the one rule
+  for the curve, score strip, histogram and badge.
+- **Model change (user approved the feature-list change, `5188071`):** two 24-hour features, drift and daily_std.
+  Contamination 0.01, n_estimators 200, random_state 42 unchanged; warm-up still 12. Chosen with the labels in view
+  (the 4-feature model caught window 4 about 45 h late); seed check: window 4 caught within 65 min for random_state
+  0, 1, 42 and about 45 h late for 2 and 3; flags inside always higher (102-161 vs 80-83). Say both in the report.
+- Watch points (score 0-0.05) rise from 1.3% to 6.1% of the stream with the new model; WATCH_SCORE stays 0.05
+  (a display threshold; they cluster in the failure windows: 96 of 144 readings in the 16 Dec view).
+- The 22-23 Dec drift (97.5 at 22 Dec 21:00 -> 72.9 at 23 Dec 12:00) is still not flagged (lowest score +0.014).
+- Verified (2026-10-15): full replay at --rate 200 with a Ctrl+C restart and a kill -9 restart in the middle, then a
+  clean uninterrupted replay: both store exactly the offline recompute (426 flags, score diff 0.0, rolling stats =
+  pandas within 2e-10, hourly_stats = GROUP BY, metrics_current = recompute, 3 forecasts = offline refit diff 0.0).
+  46 chart/table checks (AppTest, live + browse at 16 Dec, 23 Dec, 8 Feb): every chart's dataset equals the SQL
+  recompute, y-domain = y_domain(), window rects clipped, forecast = newest, tiles = metrics_current, run report =
+  results.md. Specs rendered with vl-convert. Check scripts were kept in the session scratchpad, not the repo.
+- Pipeline lag in the clean replay: avg 82.3 / median 85 / p95 124 / max 183 ms (Phase 9: 51.3 / 50 / 73 / 148). The
+  24-hour features cost about 0.3 ms per reading (statistics.stdev of 288 values: 155 us), so they do not explain it;
+  the cause was not pinned down.
+- Lessons: a wait loop on `kafka-consumer-groups.sh --describe` must check both groups explicitly: during a rebalance the
+  "scoring" row is missing and a loose check exits early. Headless Chrome returned a blank page twice this session
+  (render chart specs with vl-convert instead, or AppTest for content).
+
 ## Forecaster and hourly-window decisions from Phase 7 (keep them)
 - ARIMA (statsmodels 0.15): `ARIMA(list, order=(1,1,1)).fit()`, `get_forecast(steps=12)`, `.predicted_mean`,
   `.conf_int(alpha=0.05)`; with a plain list (no date index) `steps` must be an int. Fit + forecast takes 20-35 ms
@@ -282,6 +319,8 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   area + dashed line (12 rows each) ahead of the newest reading, hourly bar chart with 48 bars, no exceptions.
 
 ## Report numbers from Phase 9 (full replay at --rate 200 with processor + forecaster; report/results.md)
+- **History: these are the 4-feature model's numbers.** The current 6-feature numbers are in "QA pass decisions
+  (2026-10-15)", "Expected numbers", report/evaluation.csv and report/results.md.
 - 20,695 sent in 103 s, 20,683 stored (= distinct offsets), 12 late, 284 flagged (1.37%), 4 of 4 windows (83 inside, 201
   outside), peak 108.51 at 2013-12-26 15:45, minimum 2.08 at 2013-12-16 17:25; pipeline lag per reading avg 51.3 ms,
   median 50, p95 73, max 148 ms; both groups lag 0; 1,700 ARIMA fits, 1-hour-ahead MAE 1.50 (median 0.95, max 51.90),
@@ -332,7 +371,7 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 ## Deliberate departures from the course guide (say so in the report)
 - **No ZooKeeper.** Kafka 4 removed it and runs in KRaft mode, so the broker is one container.
 - **No meta-refresh tag.** `st.fragment(run_every=...)` reruns only the live part, so the sidebar keeps its state.
-- **Four features, not raw temperature**, and the model is trained on the first 2,000 rows only, not the whole file (see below).
+- **Six features, not raw temperature**, and the model is trained on the first 2,000 rows only, not the whole file (see below).
 - **Batch scoring.** One `predict` call takes about 13 ms whether it scores 1 row or 20, so score each polled batch in one call.
 
 ## Rules for every session
@@ -386,35 +425,44 @@ seq is the zero-based CSV row number. event_time = when the sensor took the read
 produced_at = when the producer sent it (used to compute pipeline lag).
 
 ## Features (src/features.py, class RollingFeatures)
-- Window: the last 12 accepted readings (1 hour of event time) in collections.deque(maxlen=12). The window includes the current reading.
-- Feature order: temperature, deviation (temperature minus window mean), rolling_std (sample standard deviation of the window, 0.0 with fewer than 2 readings), delta (temperature minus previous reading, 0.0 for the first).
+- Windows: the last 12 accepted readings (1 hour of event time) in deque(maxlen=12), and the last 288 (24 hours) in
+  deque(maxlen=288). Both include the current reading. Before 288 readings the long window is simply shorter.
+- Feature order: temperature, deviation (temperature minus window mean), rolling_std (sample standard deviation of the window, 0.0 with fewer than 2 readings), delta (temperature minus previous reading, 0.0 for the first),
+  drift (temperature minus the 24-hour mean), daily_std (sample std of the 24-hour window, 0.0 with fewer than 2).
+- drift and daily_std are not stored in `readings` (no column change); only the score and flag they influence are.
 - train_model.py and processor.py both use this class. Nothing else may compute features.
 
 ## Model
 - IsolationForest(n_estimators=200, contamination=0.01, random_state=42).
-- Fitted on the features of training rows 12-1999 (rows 0-11 only warm up the window).
+- Fitted on the 6 features of training rows 12-1999 (rows 0-11 only warm up the window). Training output
+  (2026-10-15): 1,988 rows, fitted in 0.18 s, flags 20 of its own training rows (1.01%).
 - Saved to models/anomaly_model.joblib together with the feature names and the scikit-learn version.
 - The processor loads it once at startup, scores each polled batch with one call, and never retrains.
 - anomaly_score is the decision_function value (negative means anomalous). is_anomaly is 1 when predict returns -1.
 - The first 12 events after a cold start are stored with is_anomaly = 0.
 
-### Why four features (evidence from the plan; Phase 6 reproduces it)
-| Model | Trained on | Stream flagged | Windows hit | Flags outside windows |
-| --- | --- | --- | --- | --- |
-| IF, raw value, c=0.01 | first 2,000 rows | 36.5% | 4 of 4 | 6,282 |
-| IF, raw value, c=0.01 | whole file (guide) | 1.1% | 2 of 4 | 0 |
-| **IF, 4 features, c=0.01** | first 2,000 rows | 1.4% | 4 of 4 | 201 |
-| Rolling z-score 24 h, cut-off 3 | none | 4.6% | 4 of 4 | 843 |
+### Why features, and why six (evidence from the plan, Phase 6 and the 2026-10-15 QA pass)
+| Model | Trained on | Stream flagged | Windows hit | Flags inside / outside | Window 4 first flag |
+| --- | --- | --- | --- | --- | --- |
+| IF, raw value, c=0.01 | first 2,000 rows | 36.5% | 4 of 4 | 1,259 / 6,282 | 25 min |
+| IF, raw value, c=0.01 | whole file (guide) | 1.1% | 2 of 4 | - / 0 | - |
+| IF, 4 features, c=0.01 (model until 2026-10-14) | first 2,000 rows | 1.37% | 4 of 4 | 83 / 201 | 2,695 min |
+| **IF, 6 features, c=0.01 (current)** | first 2,000 rows | 2.06% | 4 of 4 | 161 / 265 | 0 min |
+| Rolling z-score 24 h, cut-off 3 | none | 4.6% | 4 of 4 | 118 / 843 | 2,700 min |
 Raw value fails because the training week spans only 52.7-94.4, while the machine later runs normally up to 108.5.
 A flag outside a labelled window is unlabelled, not proven false.
 
 ### Expected numbers (reference checks, never targets to tune towards)
+- **6-feature model (2026-10-15):** full replay 20,683 stored, 12 late, **426 flagged (2.06%)**, 161 inside / 265
+  outside, delays 965 / 145 / 210 / 0 min, flags inside 14 / 100 / 11 / 36. Demo from 10 Dec at --rate 10: first flag
+  26.9 s (event 10 Dec 22:25, 11 flags on 10 Dec), first forecast 28.7 s, decline 15 Dec 20:15 at 168.3 s and flagged
+  at once, minimum 2.08 at 193.7 s with 66 flags so far. The numbers below are the 4-feature model's (history).
 - Phase 3 (replay from 2013-12-10, 2,200 events): about 8 flags on 2013-12-10 and 49 on 2013-12-16 (temperature collapses to about 2).
 - Phase 5 full replay: 20,683 rows stored, 12 late events dropped. Measured: exactly that, plus 284 flagged (the
   PHASES.md reference is about 284), peak 108.51 at 2013-12-26 15:45, minimum 2.08 at 2013-12-16 17:25, LAG 0 when the
   producer finished, max pipeline lag 57 ms at --rate 200. A full replay from seq 2000 also flags 9 readings on
   2013-12-09 21:30-22:10 (a fast rise right after the stream starts; outside the labelled windows).
-- Demo at --rate 10 from 2013-12-10: first flags after about 27 s (event time 10 Dec 22:40), the collapse starts about 2 min 50 s in, and the minimum of 2.1 arrives at about 3 min 14 s.
+- Demo at --rate 10 from 2013-12-10 (4-feature model): first flags after about 27 s (event time 10 Dec 22:40), the collapse starts about 2 min 50 s in, and the minimum of 2.1 arrives at about 3 min 14 s.
 
 ## Processor behaviour
 - Consumer group "scoring", auto commit off, start from the earliest offset.
@@ -485,6 +533,7 @@ Real-Time-Machine-Temperature-Anomaly-Monitoring/
 ├── dashboard/
 │   ├── app.py                 ✓ layer 6: Streamlit
 │   ├── chart_scale.py         ✓ zoomed temperature axis (tested)
+│   ├── model_labels.py        ✓ Flagged / Watch / Normal label of a reading (tested)
 │   └── run_report.py          ✓ run summary for the final report (pure pandas, tested)
 ├── scripts/
 │   ├── reset_demo.py          ✓ recreate topic, delete consumer group, empty tables
@@ -500,10 +549,12 @@ Real-Time-Machine-Temperature-Anomaly-Monitoring/
 │   ├── test_hourly.py         ✓ 2 tests: 1-hour tumbling window
 │   ├── test_forecaster.py     ✓ 6 tests: forecast rows, ARIMA wrapper, refit cadence
 │   ├── test_chart_scale.py    ✓ 7 tests: zoomed axis
+│   ├── test_model_labels.py   ✓ 5 tests: the watch label rule
 │   └── test_run_report.py     ✓ 5 tests: run report durations, pauses, summary numbers
 └── report/
     ├── screenshots/           ✓ (empty)
     ├── evaluation.csv         ✓ comparison table (scripts/evaluate.py)
+    ├── seed_check.csv         ✓ 4- and 6-feature models with random_state 0, 1, 2, 3, 42
     ├── stream_flags.png       ✓ whole stream, windows shaded, flags in red
     ├── flags_outside_windows.png  ✓ bar chart per detector
     ├── results.md             ✓ real numbers (scripts/collect_results.py)
