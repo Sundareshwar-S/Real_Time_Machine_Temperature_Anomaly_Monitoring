@@ -26,10 +26,17 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   (marked TODO), rewriting the draft in their own words, and a screen recording of the demo (DEMO.md).
 - The model is trained (`models/anomaly_model.joblib`, gitignored; retrain with `python -m src.train_model` on a fresh clone).
 - `.streamlit/secrets.toml` is generated (`python scripts/make_secrets.py`, gitignored).
-- Nothing is running and the system is reset (2026-10-15): empty tables, empty topic, no consumer groups, no
-  `.producer_state`. `report/results.md` holds the 2026-10-15 clean full replay (6-feature model); a full replay
-  reproduces it. (On 2026-10-15 the tables still held a user replay from 2026-10-13, so "reset" in this file can go stale.)
-- Git repo on branch `main`, remote `origin` on GitHub. Commit messages follow Conventional Commits, see "Git commit scheme" below.
+- Nothing is running and the system is reset (2026-10-15, end of the v3 session): empty tables, empty topic, no
+  consumer groups, no `.producer_state`, Streamlit cache and `__pycache__` cleared. `report/results.md` holds the
+  2026-10-15 clean full replay (6-feature model, 426 flags, lag avg 52.5 ms); a full replay reproduces it. (On 2026-10-15 the tables still held a user replay from 2026-10-13, so "reset" in this file can go stale.)
+- **Versions (annotated tags, pushed to GitHub):** `v1.0.0` "Version 1: all ten phases complete" (on `main`);
+  `v2.0.0` "Version 2: richer live dashboard"; `v3.0.0` "Version 3: tested pipeline, drift features, honest alerts"
+  (2026-10-15, QA pass + 6-feature model + history scrubber + clear-data button + sustained alerts).
+- Git: work happens on branch `develop` (pushed to `origin/develop`); `main` is still at v1 (`0140fb2`); a PR
+  develop -> main has been offered, not done. Remote `origin` on GitHub. Commit messages follow Conventional Commits,
+  see "Git commit scheme" below.
+- `step_by_step_instruction.md` is the user's own untracked file (not committed); it still says 284 flagged and
+  41 tests (now 426 and 70). Do not edit it unless asked.
 - Infrastructure: containers `broker` (Kafka) and `mysql` from docker-compose.yml. At the start of a session run
   `docker compose ps`; if they are not `(healthy)`, run `docker compose up -d --wait`.
 
