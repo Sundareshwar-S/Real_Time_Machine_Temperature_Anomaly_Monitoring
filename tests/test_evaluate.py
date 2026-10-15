@@ -67,3 +67,9 @@ def test_zscore_never_flags_against_a_flat_history():
     # A flat history has std 0, so z is undefined: no flag.
     temps = [10, 10, 10, 10, 50]
     assert evaluate.zscore_flags(temps, cutoff=3, history=4) == [0, 0, 0, 0, 0]
+
+
+def test_flag_episodes_counts_runs_of_flags():
+    # Three runs: [1], [1, 1, 1] and [1].
+    assert evaluate.flag_episodes([1, 0, 0, 1, 1, 1, 0, 1]) == 3
+    assert evaluate.flag_episodes([0, 0, 0]) == 0

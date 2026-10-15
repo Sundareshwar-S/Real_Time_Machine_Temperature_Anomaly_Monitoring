@@ -6,6 +6,9 @@ RollingFeatures from a cold start), and several detectors are compared:
   - IsolationForest on the 6 features at contamination 0.005, 0.01, 0.02, 0.05
     (0.01 is the model the pipeline uses)
   - the previous model: IsolationForest on the 4 one-hour features only, 0.01
+  - both models with the dashboard's sustained-alert rule: a reading counts only
+    when at least 3 of the last 6 readings are flagged (single flags near the
+    cut-off are dropped)
   - IsolationForest on raw temperature only (the course guide's approach)
   - a no-ML baseline: rolling z-score against the previous 288 readings (24 h)
 A flag outside a labelled window is unlabelled, not proven false.
@@ -30,6 +33,7 @@ import joblib  # noqa: E402
 import pandas as pd  # noqa: E402
 from sklearn.ensemble import IsolationForest  # noqa: E402
 
+from dashboard.model_labels import alert_states  # noqa: E402
 from src import config, train_model  # noqa: E402
 from src.features import FEATURE_NAMES, WINDOW_SIZE, RollingFeatures, model_row  # noqa: E402
 
@@ -126,6 +130,11 @@ def score_against_windows(times, flags, windows):
     }
 
 
+def flag_episodes(flags):
+    """How many separate runs of flagged readings there are (a flag after a normal reading starts one)."""
+    return sum(1 for i, f in enumerate(flags) if f and (i == 0 or not flags[i - 1]))
+
+
 def markdown_table(df):
     """A pandas DataFrame as a Markdown table (no extra library needed)."""
     lines = ["| " + " | ".join(df.columns) + " |", "| " + " | ".join("---" for _ in df.columns) + " |"]
@@ -175,6 +184,10 @@ def main():
         detectors.append((f"IF 6 features c={c}", "rows 12-1999", isolation_forest_flags(train_rows, stream_rows, c)))
     detectors.append(("IF 4 features c=0.01 (previous model)", "rows 12-1999",
                       isolation_forest_flags(previous_train, previous_stream, 0.01)))
+    # The dashboard's sustained-alert rule applied to the two c=0.01 models.
+    detectors.append(("IF 6 features c=0.01, 3 of last 6", "rows 12-1999", alert_states(detectors[1][2])))
+    detectors.append(("IF 4 features c=0.01 (previous model), 3 of last 6", "rows 12-1999",
+                      alert_states(detectors[4][2])))
     detectors.append(("IF raw temperature c=0.01", "rows 12-1999",
                       isolation_forest_flags(raw_train, [[t] for t in temperatures], 0.01)))
     for cutoff in (3, 4):
@@ -193,7 +206,8 @@ def main():
             "model": name, "trained_on": trained_on,
             "stream_flagged_pct": round(score["flagged_pct"], 2),
             "windows_hit": f"{score['windows_hit']} of {len(windows)}",
-            "flags": score["flags"], "flags_inside": score["inside"], "flags_outside": score["outside"],
+            "flags": score["flags"], "flag_episodes": flag_episodes(flags),
+            "flags_inside": score["inside"], "flags_outside": score["outside"],
             **{f"delay_w{i}_min": d for i, d in enumerate(score["delays_min"], start=1)},
         })
     table = pd.DataFrame(rows)
