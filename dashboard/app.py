@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import altair as alt
+import joblib
 import pandas as pd
 import pymysql
 import streamlit as st
@@ -35,7 +36,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dashboard import run_report  # noqa: E402
 from dashboard.chart_scale import FULL_SCALE, y_domain  # noqa: E402
 from dashboard.history_scrubber import from_step, history_scrubber  # noqa: E402
-from dashboard.model_labels import WATCH_SCORE, flag_label  # noqa: E402
+from dashboard.model_labels import (ALERT_NEED, ALERT_WINDOW, DEFAULT_WATCH_SCORE, alert_episodes,  # noqa: E402
+                                    alert_states, flag_label)
 from scripts import evaluate, reset_demo  # noqa: E402
 from src import config, db  # noqa: E402
 
@@ -167,6 +169,18 @@ def stream_bounds():
     return {"first": min(times), "last": max(times), "last_seq": rows[-1][0], "rows": len(rows)}
 
 
+@st.cache_data
+def load_watch_score():
+    """The model's own watch limit: the 2nd percentile of its training scores (saved by src/train_model.py)."""
+    if not config.MODEL_PATH.exists():
+        return DEFAULT_WATCH_SCORE
+    return joblib.load(config.MODEL_PATH).get("watch_score", DEFAULT_WATCH_SCORE)
+
+
+# A score from 0 up to this is "watch": close to the cut-off, as unusual as the next 1% of the training week.
+WATCH_SCORE = load_watch_score()
+
+
 # ---------------------------------------------------------------- queries (nothing cached)
 
 def run_query(sql, **params):
@@ -197,22 +211,30 @@ CURVE_COLUMNS = ("seq, event_time, temperature, rolling_avg, rolling_std, deviat
 def load_curve(n, until=None):
     """The newest n readings, or with `until` the n readings up to that event time (history).
 
-    Either way at most n rows, so the query stays fast however big the table
-    gets. Newest first, then put back in time order for the charts.
+    Either way at most n rows (plus 5 earlier ones for the alert rule), so the
+    query stays fast however big the table gets. Newest first, then put back in
+    time order for the charts.
     """
+    # The sustained-alert rule looks at the last 6 readings, so read 5 more than are
+    # shown: the first reading on the chart then gets the same answer as everywhere else.
+    rows = n + ALERT_WINDOW - 1
     if until is None:
-        df = run_query(f"SELECT {CURVE_COLUMNS} FROM readings ORDER BY id DESC LIMIT :n", n=n)
+        df = run_query(f"SELECT {CURVE_COLUMNS} FROM readings ORDER BY id DESC LIMIT :n", n=rows)
     else:
         # event_time is indexed, so this reads only the rows it returns.
         df = run_query(f"SELECT {CURVE_COLUMNS} FROM readings WHERE event_time <= :until "
-                       "ORDER BY event_time DESC LIMIT :n", n=n, until=until)
+                       "ORDER BY event_time DESC LIMIT :n", n=rows, until=until)
     df["lag_ms"] = df["lag_ms"].astype(float)   # MySQL returns the division as a DECIMAL
     df["stored_at"] = to_local(df["stored_at"])
     # The model's view of each reading: flagged (score below 0), watch (close to the cut-off) or normal.
-    df["flag"] = [flag_label(score, flagged) for score, flagged in zip(df["anomaly_score"], df["is_anomaly"])]
+    df["flag"] = [flag_label(score, flagged, WATCH_SCORE)
+                  for score, flagged in zip(df["anomaly_score"], df["is_anomaly"])]
     df["band_low"] = df["rolling_avg"] - 2 * df["rolling_std"]
     df["band_high"] = df["rolling_avg"] + 2 * df["rolling_std"]
-    return df.sort_values("event_time")
+    df = df.sort_values("event_time")
+    # Sustained alert: at least 3 of the last 6 readings flagged (dashboard/model_labels.py).
+    df["alert"] = alert_states([int(f) for f in df["is_anomaly"]])
+    return df.tail(n)
 
 
 def load_recent_flags():
@@ -323,12 +345,14 @@ def windows_caught(last_event_time):
 
 
 def machine_state(newest):
-    """Normal / Watch / Anomaly for the newest reading, from the model's own output."""
-    label = flag_label(newest["anomaly_score"], newest["is_anomaly"])
-    if label == "Flagged":
+    """Anomaly / Flagged reading / Watch / Normal for the newest reading, from the model's own output."""
+    if newest["alert"] == 1:
         return "Anomaly", "red", ":material/error:"
+    label = flag_label(newest["anomaly_score"], newest["is_anomaly"], WATCH_SCORE)
+    if label == "Flagged":
+        return "Flagged reading", "orange", ":material/report:"
     if label == "Watch":
-        return "Watch", "orange", ":material/visibility:"
+        return "Watch", "yellow", ":material/visibility:"
     return "Normal", "green", ":material/check_circle:"
 
 
@@ -351,8 +375,10 @@ def show_header(m, newest, bounds, complete):
     label, color, icon = machine_state(newest)
     with st.container(horizontal=True, vertical_alignment="center"):
         st.badge(f"Machine state: {label}", icon=icon, color=color,
-                 help=f"Anomaly: the newest reading is flagged. Watch: its anomaly score is between 0 and "
-                      f"{WATCH_SCORE} (close to the cut-off at 0). Normal: otherwise.")
+                 help=f"Anomaly: a sustained alert ({ALERT_NEED} of the last {ALERT_WINDOW} readings flagged). "
+                      "Flagged reading: the newest reading is flagged but its neighbours mostly are not. "
+                      f"Watch: its anomaly score is between 0 and {WATCH_SCORE:.4f} (close to the cut-off at 0). "
+                      "Normal: otherwise.")
         st.caption(f"Newest reading {newest['event_time']:%d %b %Y %H:%M} (event time), "
                    f"anomaly score {newest['anomaly_score']:+.3f}, arrived {newest['stored_at']:%H:%M:%S}")
     show_status(m["updated_at"], complete)
@@ -434,6 +460,21 @@ def window_shading(df):
         x="start:T", x2="end:T", tooltip=["window:N", "start:T", "end:T"])]
 
 
+def alert_bands(df):
+    """Sustained alerts on the chart as red bands, half a reading wider on each side, so a
+    short alert is still visible and neighbouring bands meet instead of leaving a gap."""
+    half = STEP / 2
+    episodes = alert_episodes(list(df["event_time"]), list(df["alert"]))
+    if not episodes:
+        return []
+    bands = pd.DataFrame({"start": [a - half for a, _ in episodes], "end": [b + half for _, b in episodes],
+                          "from": [a for a, _ in episodes], "to": [b for _, b in episodes]})
+    return [alt.Chart(bands).mark_rect(color=COLORS["flag"], opacity=0.22, clip=True).encode(
+        x="start:T", x2="end:T",
+        tooltip=[alt.Tooltip("from:T", title="sustained alert from", format="%d %b %Y %H:%M"),
+                 alt.Tooltip("to:T", title="to", format="%d %b %Y %H:%M")])]
+
+
 def vl_time(t):
     """A pandas time as a Vega-Lite date, read as local time like the chart data."""
     return alt.DateTime(year=t.year, month=t.month, date=t.day, hours=t.hour, minutes=t.minute)
@@ -444,7 +485,8 @@ def show_curve(df, forecast, x_domain):
     # From the readings only: the bands are clipped, so a wide forecast interval cannot stretch the axis.
     domain = list(y_domain(df["temperature"], zoom_axis))
     base = alt.Chart(df).encode(x=alt.X("event_time:T", title=None).scale(domain=x_domain))
-    layers = window_shading(df) if show_windows else []   # first layer = drawn behind the lines
+    layers = window_shading(df) if show_windows else []   # first layers = drawn behind the lines
+    layers += alert_bands(df)
     if show_band:
         layers.append(base.mark_area(color=COLORS["rolling_avg"], opacity=0.15, clip=True).encode(
             y=alt.Y("band_low:Q").scale(domain=domain), y2="band_high:Q"))
@@ -453,11 +495,15 @@ def show_curve(df, forecast, x_domain):
     layers.append(base.transform_fold(["temperature", "rolling_avg"], as_=["series", "value"]).mark_line().encode(
         y=alt.Y("value:Q", title="Temperature").scale(domain=domain).axis(**Y_AXIS),
         color=alt.Color("series:N", title=None).scale(SERIES).legend(orient="top")))
-    # Orange = watch (score close to 0), red = flagged (score below 0): what the model thought of each reading.
-    layers.append(alt.Chart(df[df["flag"] != "Normal"]).mark_point(filled=True, opacity=1).encode(
+    # Red points = flagged readings: large inside a sustained alert, small when on their own.
+    # Watch readings are shown in the score strip below, not here, so a long stretch
+    # close to the cut-off does not cover the curve in markers.
+    flagged = df[df["flag"] == "Flagged"].assign(
+        mark=lambda d: d["alert"].map({1: "Flagged, sustained alert", 0: "Flagged, single reading"}))
+    layers.append(alt.Chart(flagged).mark_point(filled=True, opacity=1, color=COLORS["flag"]).encode(
         x="event_time:T", y=alt.Y("temperature:Q").scale(domain=domain),
-        color=alt.Color("flag:N", title=None).scale(MARKERS).legend(orient="top"),
-        size=alt.Size("flag:N").scale(domain=["Watch", "Flagged"], range=[40, 90]).legend(None)))
+        size=alt.Size("mark:N", title=None).scale(domain=["Flagged, sustained alert", "Flagged, single reading"],
+                                                  range=[90, 25]).legend(orient="top")))
     if not forecast.empty:
         layers += forecast_layers(forecast, domain)
     # Hover anywhere: the nearest reading gets a vertical rule and a tooltip that
@@ -481,12 +527,12 @@ def show_curve(df, forecast, x_domain):
 def show_score_strip(df, x_domain):
     """The model's anomaly score under the curve, on the same time axis.
 
-    Below 0 the reading is flagged; the orange band (0 to WATCH_SCORE) is close
-    to the cut-off. A sudden jump or spike pushes it down, and so does a
-    reading far from the last 24 hours' average; a small slow drift lowers it
-    only a little.
+    Below 0 the reading is flagged; the orange band (0 to WATCH_SCORE, the
+    model's own limit) is close to the cut-off. The red band marks sustained
+    alerts, as on the curve.
     """
     base = alt.Chart(df).encode(x=alt.X("event_time:T", title="Event time").scale(domain=x_domain))
+    bands = alert_bands(df)
     watch = alt.Chart(pd.DataFrame({"low": [0.0], "high": [WATCH_SCORE]})).mark_rect(
         color=COLORS["watch"], opacity=0.18).encode(y="low:Q", y2="high:Q")
     line = base.mark_line(color=COLORS["temperature"], strokeWidth=1.5).encode(
@@ -496,14 +542,16 @@ def show_score_strip(df, x_domain):
         x="event_time:T", y="anomaly_score:Q", color=alt.Color("flag:N").scale(MARKERS).legend(None),
         tooltip=[alt.Tooltip("event_time:T", format="%d %b %Y %H:%M"), alt.Tooltip("anomaly_score:Q", format="+.3f"),
                  alt.Tooltip("temperature:Q", format=".2f"), alt.Tooltip("flag:N", title="model")])
-    st.altair_chart(alt.layer(watch, line, cut, points).properties(height=130),
+    st.altair_chart(alt.layer(*bands, watch, line, cut, points).properties(height=130),
                     alt="IsolationForest anomaly score under the temperature curve, cut-off at zero, "
-                        "watch band from 0 to 0.05, flagged readings in red")
+                        f"watch band from 0 to {WATCH_SCORE:.3f}, flagged readings in red, sustained alerts shaded")
 
 
-MODEL_NOTE = ("Red = flagged (anomaly score below 0), orange = watch (score 0 to "
-              f"{WATCH_SCORE}). The model flags sudden jumps and spikes, and readings far from the last 24 hours' "
-              "average; a small slow drift lowers the score without crossing 0. ")
+MODEL_NOTE = (f"Red band = sustained alert: at least {ALERT_NEED} of the last {ALERT_WINDOW} readings flagged. "
+              "Red points = flagged readings (anomaly score below 0); small ones stand alone. In a slow decline the "
+              "score can sit right at the cut-off, so single flags come and go from one reading to the next; the "
+              f"band shows where flags cluster. Score strip: orange = watch, score from 0 to {WATCH_SCORE:.4f} "
+              "(as unusual as the lowest 2% of the model's training week). ")
 
 
 def axis_note(domain):
