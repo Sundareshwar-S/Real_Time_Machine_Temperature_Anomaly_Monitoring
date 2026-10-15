@@ -17,7 +17,10 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   verified against independent recomputes. See "QA pass decisions (2026-10-15)".
 - **History scrubber and "Clear data and start again"** (2026-10-15, user request): the browse slider is now a small
   components-v2 scrubber that updates the chart while it is dragged and marks every flagged reading in red; a sidebar
-  button runs the reset from the dashboard. See "Scrubber and clear-data decisions (2026-10-15)". 64 tests.
+  button runs the reset from the dashboard. See "Scrubber and clear-data decisions (2026-10-15)".
+- **Flag flicker and sustained alerts** (2026-10-15, user screenshot of 7-8 Feb full of orange/red points): the chart was
+  correct, the 6-feature model flickers at the cut-off in slow declines. Display fixed (user chose "keep model, fix
+  display"); window-4 claim corrected. See "Flag flicker decisions (2026-10-15)". 70 tests.
 - **What is left is the student's own work:** screenshots into `report/screenshots/` (live dashboard, console consumer,
   consumer groups, MySQL counts), the "What I learned" paragraph and name/course details in `report/report_draft.md`
   (marked TODO), rewriting the draft in their own words, and a screen recording of the demo (DEMO.md).
@@ -93,10 +96,11 @@ and a Streamlit dashboard redraws itself every 2 seconds.
   `tests/test_forecaster.py` (6: 5-min targets, 12 values inside the interval, a raising fit and NaN/inf windows give None,
   first fit at reading 288 then every 12, repeats skipped), `tests/test_run_report.py` (5: durations, pauses left out,
   run summary on a 6-row fixture, unreached windows, Markdown), `tests/test_chart_scale.py` (7: zoomed axis rounding,
-  40-unit minimum span widened on both sides, cap at 115, zoom off, no readings), `tests/test_model_labels.py` (5:
-  flagged / watch / normal / warm-up with a negative score / missing score), `tests/test_history_scrubber.py` (6: steps,
+  40-unit minimum span widened on both sides, cap at 115, zoom off, no readings), `tests/test_model_labels.py` (10:
+  flagged / watch / normal / warm-up with a negative score / missing score, sustained-alert rule and episodes), `tests/test_history_scrubber.py` (6: steps,
   rounding, clamping, flag marks), `tests/test_reset.py` (6: idle reset in order, refuses a running processor /
-  forecaster / producer / fresh data without deleting anything, runs twice). Total: 64 tests.
+  forecaster / producer / fresh data without deleting anything, runs twice), plus `flag_episodes` in
+  `tests/test_evaluate.py`. Total: 70 tests.
 - `tests/test_features.py` (9 hand-calculated tests, 4 of them for the 24-hour features), `tests/test_scoring.py` (9 tests:
   train/serve rows identical, warm-up across batches, no warm-up after a full restore, warm-up continues after a restore
   of fewer than 12 rows, a restarted run scores exactly the rows of an uninterrupted one, one call per batch,
@@ -289,8 +293,10 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
   Contamination 0.01, n_estimators 200, random_state 42 unchanged; warm-up still 12. Chosen with the labels in view
   (the 4-feature model caught window 4 about 45 h late); seed check: window 4 caught within 65 min for random_state
   0, 1, 42 and about 45 h late for 2 and 3; flags inside always higher (102-161 vs 80-83). Say both in the report.
-- Watch points (score 0-0.05) rise from 1.3% to 6.1% of the stream with the new model; WATCH_SCORE stays 0.05
-  (a display threshold; they cluster in the failure windows: 96 of 144 readings in the 16 Dec view).
+  **CORRECTED later the same day:** the early window-4 flags are single near-threshold readings; as sustained alerts
+  window 4 is 2,705 min late (see "Flag flicker decisions").
+- Watch points (score 0-0.05) rose from 1.3% to 6.1% of the stream with the new model. Superseded: the watch limit
+  now comes from the model file (0.0345) and watch points are drawn only in the score strip.
 - The 22-23 Dec drift (97.5 at 22 Dec 21:00 -> 72.9 at 23 Dec 12:00) is still not flagged (lowest score +0.014).
 - Verified (2026-10-15): full replay at --rate 200 with a Ctrl+C restart and a kill -9 restart in the middle, then a
   clean uninterrupted replay: both store exactly the offline recompute (426 flags, score diff 0.0, rolling stats =
@@ -304,6 +310,29 @@ Import them as `from src import config`, then `config.KAFKA_TOPIC` and so on. To
 - Lessons: a wait loop on `kafka-consumer-groups.sh --describe` must check both groups explicitly: during a rebalance the
   "scoring" row is missing and a loose check exits early. Headless Chrome returned a blank page twice this session
   (render chart specs with vl-convert instead, or AppTest for content).
+
+## Flag flicker decisions (2026-10-15; keep them)
+- User screenshot (7 Feb 18:45 to 8 Feb 06:40, window 4): nearly every point orange, 15 scattered red points. The chart
+  was correct (stored = offline recompute, score diff 0.0). Cause: commit 5188071 (drift features). In that view the
+  4-feature model scored +0.07..+0.15 (all normal); the 6-feature model scores -0.026..+0.051 (median +0.017): 127
+  watch, 15 flags (11 isolated), 26 on/off switches. Over the stream 144 flag episodes vs 51.
+- So the "window 4 caught at 0 min" claim was fragile: the early flags score -0.001..-0.024. With the 3-of-last-6
+  rule: 6 features 1.83%, 40 episodes, 123 inside / 256 outside, delays 975 / 155 / 235 / 2705; 4 features 1.41%,
+  27 episodes, 82 / 209, 985 / 1320 / 235 / 2705 (report/evaluation.csv rows "..., 3 of last 6").
+- Sources: Context7 scikit-learn 1.9.1 (decision_function = score_samples - offset_; offset_ from contamination, so 0 =
+  1st percentile of training scores); Exa: Ahmad & Purdy, arXiv:1607.02480 s.3.2 (threshold a short moving average of
+  the score, W'=10, not raw scores) and monitoring debounce/hysteresis (Moogsoft "hold", detectkit
+  consecutive_anomalies). Report reference [5].
+- User chose "keep the 6-feature model, fix the display". Pipeline data unchanged (is_anomaly is still the raw flag).
+- `dashboard/model_labels.py`: `alert_states(flags, 6, 3)` (sustained alert = at least 3 of the last 6 flagged),
+  `alert_episodes(times, states)`, `flag_label(score, is_anomaly, watch)`. `load_curve` reads 5 extra rows so the rule
+  is right at the left edge, then trims to n. Main curve: red bands for alerts (+-2.5 min), red points only for flagged
+  readings (large inside an alert, small alone); watch points only in the score strip. Badge: Anomaly (alert, red),
+  Flagged reading (orange), Watch (yellow), Normal.
+- Watch limit = 2nd percentile of the model's training scores, saved as `"watch_score"` (0.0345) by train_model
+  (`WATCH_PERCENTILE = 2`); dashboard `load_watch_score()` (cached, fallback 0.05). Retrain gave identical scores.
+- Verified: AppTest at 8 Feb 06:40 (0 bands, 15 small points) and 16 Dec 18:00 (2 bands, 48 points) = SQL recompute;
+  Chrome screenshots. Clean full replay: same 426 flags; lag avg 52.5 ms (so the earlier 82 ms was run variance).
 
 ## Scrubber and clear-data decisions (2026-10-15; keep them)
 - User request: the history chart must follow the slider while it is dragged, red marks where anomalies are, and a
