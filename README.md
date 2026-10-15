@@ -4,7 +4,7 @@ A real-time streaming pipeline for one industrial machine:
 CSV replay -> Kafka -> Python processor -> IsolationForest -> MySQL -> Streamlit.
 
 Readings from the NAB machine-temperature dataset are replayed into Kafka, a Python processor keeps a
-1-hour rolling window and scores every reading with an IsolationForest, MySQL stores the results, and a
+1-hour and a 24-hour rolling window and scores every reading with an IsolationForest, MySQL stores the results, and a
 Streamlit dashboard redraws itself every 2 seconds. The design and rules live in `CLAUDE.md` and `Resources/`.
 
 Every command below was run on Ubuntu (bash). Where Windows differs, a PowerShell line is given; those
@@ -80,9 +80,10 @@ python -m src.db --init           # expect: Tables: forecasts, hourly_stats, met
 ```bash
 python -m src.train_model
 ```
-It fits an IsolationForest on the first 2,000 rows only (2 to 9 Dec 2013) and writes
+It fits an IsolationForest on six features of the first 2,000 rows only (2 to 9 Dec 2013) and writes
 `models/anomaly_model.joblib`. Expect `Training rows the model itself flags: 20 of 1988 (1.01%)`.
-Retrain after any scikit-learn upgrade: the processor refuses a model saved by another version.
+Retrain after any scikit-learn upgrade or feature change: the processor refuses a model saved by another
+version or for other features (a 4-feature model from before 2026-10-15 must be retrained).
 
 ### 8. Dashboard settings
 ```bash
@@ -92,7 +93,7 @@ Run it again after any change to the `MYSQL_*` values in `.env`.
 
 ### 9. Run the tests
 ```bash
-pytest                            # expect: 41 passed
+pytest                            # expect: 52 passed
 ```
 
 ## Run the pipeline
@@ -109,8 +110,9 @@ The forecaster is optional (the core pipeline works without it). It needs 288 re
 time, about 29 s at `--rate 10`) before its first forecast, then refits after every 12 new readings.
 
 Within seconds the curve starts to draw itself and the tiles change with no clicks. The first red
-points (readings the model flags) appear after about 27 s, at event time 10 Dec 22:40. About 3 minutes
-in, the temperature collapses to about 2 and a cluster of red points appears.
+points (readings the model flags) appear after about 27 s, at event time 10 Dec 22:25. About 2 min 48 s
+in, the temperature starts to fall and is flagged at once; at about 3 min 14 s it reaches its minimum of
+about 2, inside a cluster of red points.
 
 Stop the producer with Ctrl+C: the dashboard keeps refreshing, but the numbers freeze and the status
 line turns into "No new data for N s". Continue with `python -m src.producer --resume`.
@@ -148,13 +150,13 @@ python -m src.producer --resume                          # continue after Ctrl+C
   failure windows and the ARIMA forecast. Hover any point to see its event time and when it arrived.
   Red points are flagged readings (anomaly score below 0), orange points are "watch" readings (score 0 to
   0.05). Directly under the curve, on the same time axis, the **anomaly score strip** shows what the model
-  thought of every reading: a slow drift moves the temperature but leaves the score high; a sudden jump or
-  spike pushes it below the dashed line at 0.
+  thought of every reading: a sudden jump or spike, or a reading far from the last 24 hours' average,
+  pushes it below the dashed line at 0; a small slow drift lowers it only a little.
   Switch **Follow live → Browse history** to scroll back: the slider and the Earlier / Later buttons
   move through every stored reading while new data keeps arriving (the tiles stay live, the browsed
   chart stays still). **Back to live** returns to the newest readings.
 - **Tabs** (only the open tab queries MySQL; the open tab is kept in the URL, e.g. `?tab=Pipeline`):
-  *Model view* (anomaly score, score histogram, deviation vs delta scatter, the three window features),
+  *Model view* (score histogram, deviation vs delta scatter, the three stored 1-hour window features),
   *Hourly view* (min/avg/max per hour, flags per hour, day × hour heatmap of the whole run),
   *Pipeline* (lag per reading, forecast vs actual with MAE, run timeline: readings per wall-clock
   minute), *Readings log* (scrollable table of the readings on the curve) and *Run report* (the run so far).
@@ -174,19 +176,30 @@ compares several detectors against NAB's four labelled failure windows.
 ```bash
 python scripts/evaluate.py        # about 5 s
 ```
-It prints a Markdown table and writes `report/evaluation.csv`, `report/stream_flags.png` (the whole stream,
-windows shaded, flags in red) and `report/flags_outside_windows.png`. The run checks itself: the
-"4 features, 0.01" row must equal the pipeline's saved model (284 flags on a full replay).
+It prints two Markdown tables and writes `report/evaluation.csv`, `report/seed_check.csv`,
+`report/stream_flags.png` (the whole stream, windows shaded, flags in red) and
+`report/flags_outside_windows.png`. The run checks itself: the "6 features, 0.01" row must equal the
+pipeline's saved model (426 flags on a full replay).
 
-| Detector | Stream flagged | Windows hit | Flags outside windows |
-| --- | --- | --- | --- |
-| IsolationForest, 4 features, 0.005 | 0.93% | 4 of 4 | 125 |
-| **IsolationForest, 4 features, 0.01 (the pipeline)** | 1.37% | 4 of 4 | 201 |
-| IsolationForest, 4 features, 0.02 | 2.64% | 4 of 4 | 406 |
-| IsolationForest, 4 features, 0.05 | 6.31% | 4 of 4 | 893 |
-| IsolationForest, raw temperature, 0.01 (the course guide's approach) | 36.46% | 4 of 4 | 6,282 |
-| Rolling z-score over 288 readings, cut-off 3 (no ML) | 4.65% | 4 of 4 | 843 |
-| Rolling z-score over 288 readings, cut-off 4 (no ML) | 1.47% | 2 of 4 | 241 |
+| Detector | Stream flagged | Windows hit | Flags inside / outside | First flag after window opens (w1 / w2 / w3 / w4, min) |
+| --- | --- | --- | --- | --- |
+| IsolationForest, 6 features, 0.005 | 1.33% | 4 of 4 | 108 / 168 | 965 / 150 / 210 / 65 |
+| **IsolationForest, 6 features, 0.01 (the pipeline)** | 2.06% | 4 of 4 | 161 / 265 | 965 / 145 / 210 / 0 |
+| IsolationForest, 6 features, 0.02 | 6.05% | 4 of 4 | 553 / 699 | 0 / 135 / 205 / 0 |
+| IsolationForest, 6 features, 0.05 | 13.50% | 4 of 4 | 1,036 / 1,756 | 0 / 120 / 190 / 0 |
+| IsolationForest, 4 features, 0.01 (the previous model) | 1.37% | 4 of 4 | 83 / 201 | 975 / 165 / 210 / 2,695 |
+| IsolationForest, raw temperature, 0.01 (the course guide's approach) | 36.46% | 4 of 4 | 1,259 / 6,282 | 0 / 0 / 1,365 / 25 |
+| Rolling z-score over 288 readings, cut-off 3 (no ML) | 4.65% | 4 of 4 | 118 / 843 | 1,035 / 100 / 0 / 2,700 |
+| Rolling z-score over 288 readings, cut-off 4 (no ML) | 1.47% | 2 of 4 | 63 / 241 | - / 100 / - / 2,700 |
+
+The six features are the four 1-hour features (temperature, deviation from the 1-hour mean, 1-hour
+standard deviation, change since the previous reading) plus two 24-hour features (`drift`: temperature
+minus the 24-hour mean, `daily_std`: 24-hour standard deviation). The 24-hour features were added on
+2026-10-15 because the 4-feature model caught the slow decline in window 4 (the catastrophic failure)
+about 45 hours late; they were chosen with the labels in view. `report/seed_check.csv` refits both
+models with random_state 0, 1, 2, 3 and 42: the 6-feature model catches window 4 within 65 minutes for 3
+of the 5 seeds (seeds 2 and 3 are still about 45 hours late) and always has more flags inside the
+windows (102-161 against 80-83).
 
 A flag outside a labelled window is unlabelled, not proven false. The dashboard's sidebar toggle
 "Show known failure windows" shades the same windows behind the live curve, and a line under the tiles
@@ -240,7 +253,7 @@ docker exec -it broker /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-serv
 
 **Expected after a full replay** (reset, processor, then `python -m src.producer --rate 200` with the
 dashboard closed): 20,695 events sent, 20,683 rows stored, 12 late events dropped (12 readings on
-7 Jan 2014 repeat earlier timestamps), and LAG 0 once the processor has caught up.
+7 Jan 2014 repeat earlier timestamps), 426 readings flagged, and LAG 0 once the processor has caught up.
 
 ## When something is not running
 Each script stops with one sentence instead of a stack trace. The processor first waits up to 60 s for

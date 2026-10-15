@@ -46,10 +46,10 @@ one real second is 50 minutes of event time.
 | --- | --- | --- |
 | 0-5 s | "Live, last update 0 s ago"; the curve starts drawing; tiles tick over | Data moves producer -> Kafka -> processor -> MySQL; the page re-queries MySQL every 2 s. Nothing is clicked. |
 | about 8 s | The orange band of labelled failure window 1 appears (10 Dec 06:25) | NAB's labels: where real failures happened. The model never sees them. |
-| **about 27 s** | **First red points** (event time 10 Dec 22:40, inside window 1); "1 of 1" windows flagged | The IsolationForest scores every reading live on 4 features: temperature, deviation from the 1-hour mean, 1-hour std, change since the last reading. |
+| **about 27 s** | **First red points** (event time 10 Dec 22:25, inside window 1); "1 of 1" windows flagged | The IsolationForest scores every reading live on 6 features: temperature, deviation from the 1-hour mean, 1-hour std, change since the last reading, and two 24-hour features (deviation from the 24-hour mean, 24-hour std) for slow drifts. |
 | **about 29 s** | **First grey dashed forecast** ahead of the curve, with its band | A second consumer group ("forecast") reads the same topic independently and refits ARIMA every hour of event time. |
 | ongoing | "Anomalies per hour" bars | The hourly bars are a tumbling window (fixed hours); the rolling average is a sliding window. |
-| **about 2 min 48 s** | The temperature starts to fall (15 Dec 20:15, from 95.7) | Window 2: a hard-to-detect change before a failure. Watch the forecast: ARIMA follows trends, it cannot predict a failure. |
+| **about 2 min 48 s** | The temperature starts to fall (15 Dec 20:15, from 95.7) and is **flagged at once** | Window 2: a hard-to-detect change before a failure. Watch the forecast: ARIMA follows trends, it cannot predict a failure. |
 | **about 3 min 14 s** | **Minimum 2.1** (16 Dec 17:25), a cluster of red points; "2 of 2" windows flagged | The collapse. The KPI tiles show the running minimum and the anomaly count. |
 
 ## 3. The pause (the guide's teaching moment)
@@ -119,16 +119,27 @@ Leave Docker running, or `docker compose down` (keeps the data).
   independently; a stopped consumer catches up from its committed offset.
 - **Why train on the first 2,000 rows only?** So the model never scores data it was trained on (no leakage); they are
   the week before the first labelled failure.
-- **Why four features, not raw temperature?** The training week only spans 52.7-94.4, but the machine later runs
+- **Why features, not raw temperature?** The training week only spans 52.7-94.4, but the machine later runs
   normally up to 108.5: a raw-value model flags 36.5% of the stream. The features describe behaviour (sudden change,
-  instability), which stays comparable as the level drifts (see report/evaluation.csv).
+  instability, distance from the day's average), which stays comparable as the level drifts (see report/evaluation.csv).
+- **Why six features, not four?** With only the four 1-hour features, the slow decline in window 4 (the catastrophic
+  failure) was first flagged about 45 hours after the window opened. Adding the deviation from the 24-hour mean and
+  the 24-hour std catches it at the window's start (161 flags inside the windows instead of 83, 265 outside instead
+  of 201). Honest caveats: they were chosen after seeing the labels, and with other random seeds window 4 is caught
+  early in 3 of 5 cases (report/seed_check.csv).
 - **What is contamination?** The share of training data treated as anomalous; it sets the threshold. 0.01 here.
-  Higher catches failures earlier but adds flags outside the labelled windows (0.05: 893 outside vs 201).
+  Higher catches failures earlier but adds flags outside the labelled windows (0.02: 699 outside vs 265).
 - **Why no ZooKeeper?** Kafka 4 runs in KRaft mode: the broker manages its own metadata, one container is the cluster.
 - **Why does pausing the producer freeze the numbers but not the refresh?** The fragment keeps re-querying on its
   timer, but no new rows arrive in MySQL.
 
 ## Rehearsal record
+**Re-timed on 2026-10-15 with the 6-feature model** (`--start-at "2013-12-10 00:00" --rate 10`, measured from the
+stored rows): first flag 26.9 s (event time 10 Dec 22:25, 11 flags on 10 Dec); first forecast 28.7 s; decline
+starts 168.3 s (15 Dec 20:15, 95.7), and that very reading is the first flag in window 2; minimum 2.08 at
+193.7 s (16 Dec 17:25) with 66 flags so far. The table below is the original 2026-10-11 rehearsal with the
+4-feature model; its pause/resume steps do not depend on the model.
+
 Timed run of steps 1 to 5 on 2026-10-11 (Ubuntu, `--start-at "2013-12-10 00:00" --rate 10`). Times in seconds after
 the producer started; the moments were measured by polling MySQL every 0.2 s.
 
