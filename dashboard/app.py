@@ -31,6 +31,7 @@ from streamlit.errors import StreamlitAPIException
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dashboard import run_report  # noqa: E402
 from dashboard.chart_scale import FULL_SCALE, y_domain  # noqa: E402
+from dashboard.history_scrubber import from_step, history_scrubber  # noqa: E402
 from dashboard.model_labels import WATCH_SCORE, flag_label  # noqa: E402
 from scripts import evaluate  # noqa: E402
 from src import config  # noqa: E402
@@ -74,6 +75,7 @@ with st.sidebar:
 # Widget state used by the history browser, set once per browser session.
 st.session_state.setdefault("curve_mode", "Follow live")
 st.session_state.setdefault("celebrated", False)
+
 
 # Database settings come from .streamlit/secrets.toml ([connections.mysql]).
 try:
@@ -206,6 +208,12 @@ def load_flag_times():
     return run_query("SELECT event_time FROM readings WHERE is_anomaly = 1")
 
 
+def load_stored_range():
+    # Oldest and newest stored event time (event_time is indexed, so this is quick).
+    row = run_query("SELECT MIN(event_time) AS oldest, MAX(event_time) AS newest FROM readings").iloc[0]
+    return row["oldest"].to_pydatetime(), row["newest"].to_pydatetime()
+
+
 @st.cache_data(max_entries=2, show_spinner=False)
 def load_run_data(version):
     """Every stored reading and every forecast point that can be checked, for the run report.
@@ -239,6 +247,12 @@ def shift_history(readings):
 
 def back_to_live():
     st.session_state.curve_mode = "Follow live"
+
+
+def scrubbed():
+    """The history scrubber moved (also while it is being dragged): show readings up to its new position."""
+    bounds = stream_bounds()
+    st.session_state.history_end = from_step(st.session_state.history_scrub["end"], bounds["first"], bounds["last"])
 
 
 # ---------------------------------------------------------------- status, tiles
@@ -444,13 +458,19 @@ def axis_note(domain):
 
 
 def history_controls():
-    """Slider and buttons to scroll back through every stored reading. Returns the chosen end time."""
+    """Scrubber and buttons to scroll back through every stored reading. Returns the chosen end time.
+
+    The scrubber spans the whole stream (fixed bounds from the CSV), shades the
+    part already stored and marks every flagged reading in red. It reports its
+    position while it is dragged, so the chart below follows the hand.
+    """
     bounds = stream_bounds()
     st.session_state.setdefault("history_end", st.session_state.latest_event_time)
     half = CURVE_ROWS // 2
-    with st.container(horizontal=True, vertical_alignment="bottom"):
-        st.slider("Show readings up to (event time)", min_value=bounds["first"], max_value=bounds["last"],
-                  step=STEP, format="D MMM YYYY, HH:mm", key="history_end")
+    history_scrubber(st.session_state.history_end, bounds["first"], bounds["last"],
+                     load_flag_times()["event_time"].dt.to_pydatetime(), load_stored_range(),
+                     key="history_scrub", on_change=scrubbed)
+    with st.container(horizontal=True, vertical_alignment="center"):
         st.button("Earlier", icon=":material/chevron_left:", on_click=shift_history, args=(-half,),
                   help=f"Move back {half} readings ({run_report.format_duration(half * 300)} of event time).")
         st.button("Later", icon=":material/chevron_right:", on_click=shift_history, args=(half,),
