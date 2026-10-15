@@ -11,6 +11,7 @@ import csv
 import time
 
 import joblib
+import numpy as np
 import sklearn
 from sklearn.ensemble import IsolationForest
 
@@ -21,6 +22,10 @@ from src.features import FEATURE_NAMES, WINDOW_SIZE, RollingFeatures, model_row
 N_ESTIMATORS = 200     # number of random trees
 CONTAMINATION = 0.01   # share of training rows treated as anomalous: sets the threshold
 RANDOM_STATE = 42      # same trees on every run, so results are repeatable
+# The dashboard's "watch" band: scores from 0 up to the 2nd percentile of the
+# model's own training scores. 0 itself is the 1st percentile (set by
+# CONTAMINATION), so a watch reading is as unusual as the next 1% of training.
+WATCH_PERCENTILE = 2
 
 
 def load_training_rows():
@@ -54,12 +59,15 @@ def main():
     # training data the model flags about `contamination` of the rows.
     flagged = sum(1 for p in model.predict(rows) if p == -1)
     print(f"Training rows the model itself flags: {flagged} of {len(rows)} ({flagged / len(rows):.2%})")
+    watch_score = float(np.percentile(model.decision_function(rows), WATCH_PERCENTILE))
+    print(f"Watch limit for the dashboard ({WATCH_PERCENTILE}nd percentile of training scores): {watch_score:.4f}")
 
     # Save the feature names and the library version with the model, so the
     # processor can refuse a model built for other columns or another scikit-learn.
     config.MODEL_PATH.parent.mkdir(exist_ok=True)
     joblib.dump(
-        {"model": model, "feature_names": FEATURE_NAMES, "sklearn_version": sklearn.__version__},
+        {"model": model, "feature_names": FEATURE_NAMES, "sklearn_version": sklearn.__version__,
+         "watch_score": watch_score},
         config.MODEL_PATH,
     )
     print(f"Saved {config.MODEL_PATH.relative_to(config.ROOT)} (scikit-learn {sklearn.__version__})")
