@@ -32,8 +32,8 @@ and a Streamlit dashboard redraws itself every 2 seconds.
 - **Versions (annotated tags, pushed to GitHub):** `v1.0.0` "Version 1: all ten phases complete" (on `main`);
   `v2.0.0` "Version 2: richer live dashboard"; `v3.0.0` "Version 3: tested pipeline, drift features, honest alerts"
   (2026-10-15, QA pass + 6-feature model + history scrubber + clear-data button + sustained alerts).
-- Git: work happens on branch `develop` (pushed to `origin/develop`); `main` is still at v1 (`0140fb2`); a PR
-  develop -> main has been offered, not done. Remote `origin` on GitHub. Commit messages follow Conventional Commits,
+- Git: work happens on branch `develop` (pushed to `origin/develop`). On 2026-10-15 `main` was fast-forwarded to
+  `develop` at v3 (user request; no merge commit), so both branches hold version 3. Remote `origin` on GitHub. Commit messages follow Conventional Commits,
   see "Git commit scheme" below.
 - `step_by_step_instruction.md` is the user's own untracked file (not committed); it still says 284 flagged and
   41 tests (now 426 and 70). Do not edit it unless asked.
